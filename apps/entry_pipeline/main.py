@@ -8,6 +8,7 @@ from core.tracking import IOUTracker
 from core.recognition import AdaFaceRecognizer
 from core.fusion import EmbeddingAggregator
 from core.quality import calculate_blur_score
+from core.database import FaceDatabase
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -31,6 +32,9 @@ def run_pipeline():
         buffer_size=10, 
         min_frames=config['recognition']['min_frames_for_decision']
     )
+    
+    dummy_embeddings = {}
+    face_db = FaceDatabase(dummy_embeddings)
     
     # Open camera (using camera_01 from config)
     cap = cv2.VideoCapture(camera_cfg['cameras'][0]['url'])
@@ -71,6 +75,17 @@ def run_pipeline():
             
             # Get consensus
             consensus_emb = aggregator.get_aggregated_embedding(face.track_id)
+            
+            if consensus_emb is not None:
+                identity, score = face_db.match(
+                    consensus_emb, 
+                    config['recognition']['similarity_threshold']
+                )
+                
+                if identity is not None:
+                    print(f"Authorized: {identity} ({score:.3f})")
+                else:
+                    print(f"Unknown ({score:.3f})")
             
             # 5. Visualization (Simplified)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
