@@ -5,3 +5,4 @@ detection:
 recognition:
   distance_threshold: 0.6
   min_face_size: 64
+  blur_threshold: 100
