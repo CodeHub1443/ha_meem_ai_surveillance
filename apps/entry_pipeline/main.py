@@ -39,6 +39,8 @@ def run_pipeline():
     # Open camera (using camera_01 from config)
     cap = cv2.VideoCapture(camera_cfg['cameras'][0]['url'])
     
+    decided_tracks = set()
+    
     print("Starting AI Surveillance Pipeline...")
     
     while cap.isOpened():
@@ -76,7 +78,7 @@ def run_pipeline():
             # Get consensus
             consensus_emb = aggregator.get_aggregated_embedding(face.track_id)
             
-            if consensus_emb is not None:
+            if consensus_emb is not None and face.track_id not in decided_tracks:
                 identity, score = face_db.match(
                     consensus_emb, 
                     config['recognition']['similarity_threshold']
@@ -86,6 +88,8 @@ def run_pipeline():
                     print(f"Authorized: {identity} ({score:.3f})")
                 else:
                     print(f"Unknown ({score:.3f})")
+                
+                decided_tracks.add(face.track_id)
             
             # 5. Visualization (Simplified)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
