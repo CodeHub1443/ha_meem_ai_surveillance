@@ -27,7 +27,10 @@ def run_pipeline():
     detector = SCRFDDetector(config, config['models']['scrfd_onnx'])
     tracker = IOUTracker(iou_threshold=0.3)
     recognizer = AdaFaceRecognizer(config, config['models']['adaface_onnx'])
-    aggregator = EmbeddingAggregator(buffer_size=10)
+    aggregator = EmbeddingAggregator(
+        buffer_size=10, 
+        min_frames=config['recognition']['min_frames_for_decision']
+    )
     
     # Open camera (using camera_01 from config)
     cap = cv2.VideoCapture(camera_cfg['cameras'][0]['url'])
