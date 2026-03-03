@@ -1,0 +1,7 @@
+# Detection and Recognition thresholds
+detection:
+  confidence: 0.5
+  iou: 0.45
+recognition:
+  distance_threshold: 0.6
+  min_face_size: 64

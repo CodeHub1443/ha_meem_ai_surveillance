@@ -1,0 +1,8 @@
+# Base requirements
+numpy>=1.24.0
+opencv-python-headless
+onnxruntime-gpu
+pyyaml
+clearml
+torch
+torchvision

@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv
+venv/
+venv.bak/
+ENV/
+
+# Models and Weights
+models/face_detection/*.pth
+models/face_detection/*.onnx
+models/face_detection/*.engine
+models/face_recognition/*.pth
+models/face_recognition/*.onnx
+models/face_recognition/*.engine
+models/exported/*.onnx
+models/exported/*.engine
+models/exported/*.trt
+
+# Experiments and Logs
+.clearml/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+.gemini/
+.agents/
+AGENT_CONTEXT.md
