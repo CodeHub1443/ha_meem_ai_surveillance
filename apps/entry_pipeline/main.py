@@ -28,9 +28,9 @@ def run_pipeline():
     
     # Initialize components
     # Note: Paths are placeholders as weights aren't committed
-    detector = SCRFDDetector(config, 'models/exported/scrfd.onnx')
+    detector = SCRFDDetector(config, config['models']['scrfd_onnx'])
     tracker = IOUTracker(iou_threshold=0.3)
-    recognizer = AdaFaceRecognizer(config, 'models/exported/adaface.onnx')
+    recognizer = AdaFaceRecognizer(config, config['models']['adaface_onnx'])
     aggregator = EmbeddingAggregator(buffer_size=10)
     
     # Open camera (using camera_01 from config)
