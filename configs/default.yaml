@@ -1,7 +1,13 @@
 # Default system settings
+
 pipeline:
   device: cuda
   precision: fp16
   batch_size: 1
+
 logging:
   level: INFO
+
+models:
+  scrfd_onnx: models/exported/scrfd_10g_bnkps.onnx
+  adaface_onnx: models/exported/adaface.onnx

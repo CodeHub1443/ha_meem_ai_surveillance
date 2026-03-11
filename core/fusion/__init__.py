@@ -1,1 +1,3 @@
-# Init file for fusion module
+from .aggregator import EmbeddingAggregator
+
+__all__ = ["EmbeddingAggregator"]
