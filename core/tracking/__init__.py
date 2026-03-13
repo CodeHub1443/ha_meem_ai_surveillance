@@ -1,1 +1,3 @@
-# Init file for tracking module
+from .iou_tracker import IOUTracker
+
+__all__ = ["IOUTracker"]

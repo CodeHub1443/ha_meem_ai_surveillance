@@ -3,5 +3,7 @@ detection:
   confidence: 0.5
   iou: 0.45
 recognition:
-  distance_threshold: 0.6
-  min_face_size: 64
+  similarity_threshold: 0.55
+  min_face_size: 140
+  blur_threshold: 100
+  min_frames_for_decision: 8
