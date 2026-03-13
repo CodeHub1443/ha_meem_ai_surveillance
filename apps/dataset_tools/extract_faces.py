@@ -19,16 +19,25 @@ def load_config():
     
     config = _read_yaml('configs/default.yaml')
     thresholds = _read_yaml('configs/thresholds.yaml')
+    dataset = _read_yaml('configs/dataset.yaml')
+    
     config.update(thresholds)
+    if dataset:
+        if 'dataset' in config:
+            config['dataset'].update(dataset.get('dataset', {}))
+        else:
+            config.update(dataset)
+            
     return config
 
 def main():
     # Load settings
     config = load_config()
     
-    # Paths according to requirements
-    input_dir = Path('dataset/raw_frames')
-    output_dir = Path('dataset/aligned_faces')
+    # Paths according to requirements or config
+    dataset_cfg = config.get('dataset', {})
+    input_dir = Path(dataset_cfg.get('raw_frames', 'dataset/raw_frames'))
+    output_dir = Path(dataset_cfg.get('aligned_faces', 'dataset/aligned_faces'))
     
     # Create base output directory
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -50,29 +59,40 @@ def main():
         print(f"Error: Input folder '{input_dir}' does not exist.")
         return
 
+    # Process each person subdirectory or individual files
     print(f"Starting dataset extraction...")
     print(f"Input: {input_dir}")
     print(f"Output: {output_dir}")
     print("-" * 40)
 
-    # Process each person subdirectory
-    for person_path in sorted(input_dir.iterdir()):
-        if not person_path.is_dir():
+    # Collect work items: (person_name, list_of_images)
+    work_items = {}
+    
+    for item in sorted(input_dir.iterdir()):
+        if item.is_dir():
+            person_name = item.name
+            work_items[person_name] = [img for img in item.iterdir() if img.suffix.lower() in ['.jpg', '.jpeg', '.png']]
+        elif item.is_file() and item.suffix.lower() in ['.jpg', '.jpeg', '.png']:
+            # Infer person name from filename: e.g. "albid_1.jpg" -> "albid"
+            person_name = item.stem.split('_')[0].split(' (')[0]
+            if person_name not in work_items:
+                work_items[person_name] = []
+            work_items[person_name].append(item)
+
+    for person_name, images in work_items.items():
+        if not images:
             continue
             
         persons_count += 1
-        person_name = person_path.name
         
         # Mirror structure in output
         person_output_dir = output_dir / person_name
         person_output_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"Processing: {person_name}")
+        print(f"Processing: {person_name} ({len(images)} images)")
         
         # Process files in person folder
-        for img_path in person_path.iterdir():
-            if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png']:
-                continue
+        for img_path in images:
                 
             frame = cv2.imread(str(img_path))
             if frame is None:

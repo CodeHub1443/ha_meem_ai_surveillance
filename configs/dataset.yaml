@@ -2,5 +2,6 @@
 # Ensure these paths point to your actual data storage outside the repository.
 
 dataset:
-  raw_frames: C:/ha_meem_data/raw_frames
-  aligned_faces: C:/ha_meem_data/aligned_faces
+  raw_frames: C:/Users/acer/Desktop/TDI/Ha-meem/Face_images/raw_frames
+  aligned_faces: C:/Users/acer/Desktop/TDI/Ha-meem/Face_images/aligned_faces
+  gallery_embeddings: C:/Users/acer/Desktop/TDI/Ha-meem/Face_images/gallery_embeddings.npy

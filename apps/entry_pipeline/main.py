@@ -2,6 +2,7 @@ import cv2
 import yaml
 import time
 import os
+import numpy as np
 
 from core.detection import SCRFDDetector, Face
 from core.tracking import IOUTracker
@@ -33,8 +34,13 @@ def run_pipeline():
         min_frames=config['recognition']['min_frames_for_decision']
     )
     
-    dummy_embeddings = {}
-    face_db = FaceDatabase(dummy_embeddings)
+    dataset_cfg = load_config('configs/dataset.yaml')
+
+    gallery_path = dataset_cfg['dataset']['gallery_embeddings']
+
+    gallery_embeddings = np.load(gallery_path, allow_pickle=True).item()
+
+    face_db = FaceDatabase(gallery_embeddings)
     
     # Open camera (using camera_01 from config)
     cap = cv2.VideoCapture(camera_cfg['cameras'][0]['url'])
