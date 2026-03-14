@@ -4,6 +4,7 @@ import time
 import os
 import numpy as np
 
+from core.events import EventEmitter
 from core.detection import SCRFDDetector, Face
 from core.tracking import IOUTracker
 from core.recognition import AdaFaceRecognizer
@@ -45,7 +46,16 @@ def run_pipeline():
     # Open camera (using camera_01 from config)
     cap = cv2.VideoCapture(camera_cfg['cameras'][0]['url'])
     
+    event_emitter = EventEmitter(
+        camera_id="cam_01",
+        log_file="logs/events.jsonl"
+    )
+    
     decided_tracks = set()
+    
+    # Cooldown mechanism for authorized identities
+    identity_last_seen = {}
+    identity_cooldown_seconds = 6
     
     print("Starting AI Surveillance Pipeline...")
     
@@ -62,6 +72,12 @@ def run_pipeline():
         # 2. Tracking
         tracked_faces = tracker.update(faces)
         
+        active_track_ids = set(face.track_id for face in tracked_faces)
+        for track_id in list(aggregator.track_buffers.keys()):
+            if track_id not in active_track_ids:
+                del aggregator.track_buffers[track_id]
+                decided_tracks.discard(track_id)
+                
         for face in tracked_faces:
             # Operational Constraints: Resolution Gate
             if face.width < config['recognition']['min_face_size']:
@@ -90,12 +106,25 @@ def run_pipeline():
                     config['recognition']['similarity_threshold']
                 )
                 
+                current_time = time.time()
+                
+                event_emitted = False
+                
                 if identity is not None:
-                    print(f"Authorized: {identity} ({score:.3f})")
+                    last_seen = identity_last_seen.get(identity, 0)
+                    
+                    if current_time - last_seen >= identity_cooldown_seconds:
+                        print(f"Authorized: {identity} ({score:.3f})")
+                        event_emitter.emit_authorized(face.track_id, identity, score)
+                        identity_last_seen[identity] = current_time
+                        event_emitted = True
                 else:
                     print(f"Unknown ({score:.3f})")
+                    event_emitter.emit_unknown(face.track_id, score)
+                    event_emitted = True
                 
-                decided_tracks.add(face.track_id)
+                if event_emitted:
+                    decided_tracks.add(face.track_id)
             
             # 5. Visualization (Simplified)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)

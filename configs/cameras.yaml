@@ -1,8 +1,11 @@
 # Camera configuration
 cameras:
   - id: camera_01
-    url: C:/Users/acer/Desktop/TDI/Ha-meem/test_videos/albid.mp4
+    url: C:/Users/acer/Desktop/TDI/Ha-meem/test_videos/albid_cv.mp4
     name: Front Entrance
+
   - id: camera_02
     url: C:/Users/acer/Desktop/TDI/Ha-meem/test_videos/ismum.mp4
     name: Back Exit
+
+#rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=30&subtype=0
