@@ -4,13 +4,14 @@ import time
 import os
 import numpy as np
 
-from core.events import EventEmitter
+from core.events import EventEmitter, SnapshotWriter
 from core.detection import SCRFDDetector, Face
 from core.tracking import IOUTracker
 from core.recognition import AdaFaceRecognizer
 from core.fusion import EmbeddingAggregator
 from core.quality import calculate_blur_score
 from core.database import FaceDatabase
+
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -49,6 +50,11 @@ def run_pipeline():
     event_emitter = EventEmitter(
         camera_id="cam_01",
         log_file="logs/events.jsonl"
+    )
+    
+    snapshot_writer = SnapshotWriter(
+        base_dir="snapshots",
+        camera_id="cam_01"
     )
     
     decided_tracks = set()
@@ -115,12 +121,14 @@ def run_pipeline():
                     
                     if current_time - last_seen >= identity_cooldown_seconds:
                         print(f"Authorized: {identity} ({score:.3f})")
-                        event_emitter.emit_authorized(face.track_id, identity, score)
+                        snapshot_path = snapshot_writer.save(frame, identity)
+                        event_emitter.emit_authorized(face.track_id, identity, score, snapshot_path)
                         identity_last_seen[identity] = current_time
                         event_emitted = True
                 else:
                     print(f"Unknown ({score:.3f})")
-                    event_emitter.emit_unknown(face.track_id, score)
+                    snapshot_path = snapshot_writer.save(frame, None)
+                    event_emitter.emit_unknown(face.track_id, score, snapshot_path)
                     event_emitted = True
                 
                 if event_emitted:

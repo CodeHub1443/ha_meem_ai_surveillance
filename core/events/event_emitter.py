@@ -13,25 +13,26 @@ class EventEmitter:
         # Ensure log directory exists
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         
-    def _emit(self, track_id: int, identity: str, score: float, event_type: str):
+    def _emit(self, track_id: int, identity: str, score: float, event_type: str, snapshot: str = None):
         """Helper to construct and append the event JSON."""
         event = {
-            "timestamp": datetime.utcnow().isoformat() + "Z", # ISO8601
+            "timestamp": datetime.now().isoformat(), # Local time (ISO8601)
             "camera_id": self.camera_id,
             "track_id": track_id,
             "identity": identity,
             "score": float(score), # Ensure score is JSON serializable
-            "event": event_type
+            "event": event_type,
+            "snapshot": snapshot
         }
         
         # Append as JSON line
         with open(self.log_file, 'a', buffering=1) as f:
             f.write(json.dumps(event) + "\n")
 
-    def emit_authorized(self, track_id: int, identity: str, score: float):
+    def emit_authorized(self, track_id: int, identity: str, score: float, snapshot: str = None):
         """Emits an AUTHORIZED event."""
-        self._emit(track_id, identity, score, "AUTHORIZED")
+        self._emit(track_id, identity, score, "AUTHORIZED", snapshot)
 
-    def emit_unknown(self, track_id: int, score: float):
+    def emit_unknown(self, track_id: int, score: float, snapshot: str = None):
         """Emits an UNKNOWN event."""
-        self._emit(track_id, None, score, "UNKNOWN")
+        self._emit(track_id, None, score, "UNKNOWN", snapshot)
