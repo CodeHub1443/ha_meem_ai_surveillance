@@ -1,4 +1,3 @@
-from .event import RecognitionEvent
-from .event_builder import EventBuilder
+from .event_emitter import EventEmitter
 
-__all__ = ["RecognitionEvent", "EventBuilder"]
+__all__ = ["EventEmitter"]
