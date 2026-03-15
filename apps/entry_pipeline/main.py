@@ -2,6 +2,7 @@ import cv2
 import yaml
 import time
 import os
+from datetime import datetime
 import numpy as np
 
 from core.events import EventEmitter, SnapshotWriter
@@ -116,19 +117,40 @@ def run_pipeline():
                 
                 event_emitted = False
                 
+                # Check for cooldown if authorized
+                can_emit = True
                 if identity is not None:
                     last_seen = identity_last_seen.get(identity, 0)
+                    if current_time - last_seen < identity_cooldown_seconds:
+                        can_emit = False
+                
+                if can_emit:
+                    # 1. Create a single source of truth for time
+                    event_time = datetime.now()
                     
-                    if current_time - last_seen >= identity_cooldown_seconds:
-                        print(f"Authorized: {identity} ({score:.3f})")
-                        snapshot_path = snapshot_writer.save(frame, identity)
-                        event_emitter.emit_authorized(face.track_id, identity, score, snapshot_path)
+                    # 2. Create event object
+                    event_data = {
+                        "timestamp": event_time.isoformat(),
+                        "camera_id": "cam_01",
+                        "track_id": face.track_id,
+                        "identity": identity,
+                        "score": float(score),
+                        "event": "AUTHORIZED" if identity else "UNKNOWN"
+                    }
+                    
+                    # 3. Capture and save snapshot
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, identity or "UNKNOWN", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    snapshot_path = snapshot_writer.save(frame, identity, timestamp=event_time)
+                    event_data["snapshot"] = snapshot_path
+                    
+                    # 4. Emit event
+                    print(f"{event_data['event']}: {identity if identity else 'Unknown'} ({score:.3f})")
+                    event_emitter.emit(event_data)
+                    
+                    if identity is not None:
                         identity_last_seen[identity] = current_time
-                        event_emitted = True
-                else:
-                    print(f"Unknown ({score:.3f})")
-                    snapshot_path = snapshot_writer.save(frame, None)
-                    event_emitter.emit_unknown(face.track_id, score, snapshot_path)
                     event_emitted = True
                 
                 if event_emitted:
