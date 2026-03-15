@@ -6,4 +6,4 @@ recognition:
   similarity_threshold: 0.55
   min_face_size: 140
   blur_threshold: 100
-  min_frames_for_decision: 6
+  min_frames_for_decision: 8
