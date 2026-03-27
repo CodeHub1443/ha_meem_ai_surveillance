@@ -15,9 +15,17 @@ class FaceDatabase:
         self.stored_embeddings = None
         
         if embeddings:
-            self.ids = list(embeddings.keys())
-            # Stack and normalize all embeddings at once for vectorization
-            raw_embeddings = np.stack(list(embeddings.values()))
+            all_embeddings = []
+            all_ids = []
+
+            for person_id, emb_list in embeddings.items():
+                for emb in emb_list:
+                    all_embeddings.append(emb)
+                    all_ids.append(person_id)
+
+            raw_embeddings = np.stack(all_embeddings)
+            self.ids = all_ids
+
             norms = np.linalg.norm(raw_embeddings, axis=1, keepdims=True)
             self.stored_embeddings = raw_embeddings / (norms + 1e-6)
 
