@@ -93,15 +93,19 @@ def main():
             total_images_used += 1
 
         if person_embeddings:
-            # 6. Aggregate embeddings per person using mean embedding
-            mean_embedding = np.mean(person_embeddings, axis=0)
-            
-            # 7. Normalize the final embedding vector
-            norm = np.linalg.norm(mean_embedding)
-            if norm > 0:
-                mean_embedding = mean_embedding / norm
-            
-            gallery[person_id] = mean_embedding
+            # normalize each embedding individually
+            normalized_embeddings = []
+            for emb in person_embeddings:
+                norm = np.linalg.norm(emb)
+                if norm > 0:
+                    emb = emb / norm
+                normalized_embeddings.append(emb)
+
+            # limit to max 10 embeddings per person (for efficiency)
+            MAX_EMB = 10
+            normalized_embeddings = normalized_embeddings[:MAX_EMB]
+
+            gallery[person_id] = normalized_embeddings
             persons_processed += 1
             print(f"Processed: {person_id:20} | Images: {len(person_embeddings):3d}")
 

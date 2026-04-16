@@ -6,3 +6,4 @@ pyyaml
 clearml
 torch
 torchvision
+insightface
