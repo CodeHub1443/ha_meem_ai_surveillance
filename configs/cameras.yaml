@@ -1,12 +1,13 @@
 # Camera configuration
 cameras:
   - id: camera_01
-    url: rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=32&subtype=0
+    url: rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=31&subtype=0
     name: Front Entrance
 
   - id: camera_02
-    url: C:/Users/acer/Desktop/TDI/Ha-meem/test_videos/ismum.mp4
+    url: #rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=32&subtype=0
     name: Back Exit
 
 #rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=30&subtype=0
 #rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=13&subtype=0
+#C:/Users/acer/Desktop/TDI/Ha-meem/test_videos/ismum.mp4

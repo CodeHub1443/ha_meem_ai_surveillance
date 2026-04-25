@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from core.detection import SCRFDDetector
+from core.utils.image import align_face
 
 def load_config():
     """Load and merge configuration files identically to main pipeline."""
@@ -115,13 +116,14 @@ def main():
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
                 
-                face_crop = frame[y1:y2, x1:x2]
-                
-                if face_crop.size == 0:
-                    continue
-                
-                # Save cropped face
-                # Mirroring naming or appending index if multiple faces found
+                if face.kps is not None:
+                    face_crop = align_face(frame, face.kps)
+                else:
+                    raw = frame[y1:y2, x1:x2]
+                    if raw.size == 0:
+                        continue
+                    face_crop = cv2.resize(raw, (112, 112))
+
                 save_path = person_output_dir / f"{img_path.stem}_{i:03d}.jpg"
                 cv2.imwrite(str(save_path), face_crop)
                 extracted_count += 1
