@@ -1,9 +1,7 @@
 # Default system settings
 
 pipeline:
-  device: cuda
-  precision: fp16
-  batch_size: 1
+  device: cuda                 # cuda | cpu
 
 logging:
   level: INFO

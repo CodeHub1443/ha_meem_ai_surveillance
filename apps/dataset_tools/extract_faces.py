@@ -1,5 +1,6 @@
 import os
 import cv2
+import numpy as np
 import yaml
 import sys
 from pathlib import Path
@@ -8,6 +9,22 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from core.detection import SCRFDDetector
+from core.utils.image import align_face
+
+
+def apply_clahe(frame: np.ndarray) -> np.ndarray:
+    """Improve local contrast via CLAHE on the L channel (LAB colour space).
+
+    Lifts underexposed faces (dark skin / poor lighting) without
+    overexposing already-bright regions.  Applied to the full frame
+    before detection so SCRFD and the aligner both see better contrast.
+    """
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
 
 def load_config():
     """Load and merge configuration files identically to main pipeline."""
@@ -97,7 +114,9 @@ def main():
             frame = cv2.imread(str(img_path))
             if frame is None:
                 continue
-                
+
+            frame = apply_clahe(frame)
+
             # Detect faces using SCRFD
             faces = detector.detect(frame)
             
@@ -115,13 +134,14 @@ def main():
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
                 
-                face_crop = frame[y1:y2, x1:x2]
-                
-                if face_crop.size == 0:
-                    continue
-                
-                # Save cropped face
-                # Mirroring naming or appending index if multiple faces found
+                if face.kps is not None:
+                    face_crop = align_face(frame, face.kps)
+                else:
+                    raw = frame[y1:y2, x1:x2]
+                    if raw.size == 0:
+                        continue
+                    face_crop = cv2.resize(raw, (112, 112))
+
                 save_path = person_output_dir / f"{img_path.stem}_{i:03d}.jpg"
                 cv2.imwrite(str(save_path), face_crop)
                 extracted_count += 1
