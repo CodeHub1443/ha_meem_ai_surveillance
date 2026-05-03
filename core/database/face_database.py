@@ -54,18 +54,35 @@ class FaceDatabase:
     # ------------------------------------------------------------------
 
     def match(
-        self, query_embedding: np.ndarray, threshold: float
+        self,
+        query_embedding: np.ndarray,
+        threshold: float,
+        margin: float = 0.0,
+        top_k: int = 10,
     ) -> Tuple[Optional[str], float]:
         """Find the best matching identity for a query embedding.
+
+        Retrieves the top-K embedding matches, groups them by identity (taking
+        the max score per identity), then applies both a threshold and a margin
+        test against the second-best identity.  This prevents false accepts when
+        two gallery identities score very close together — a near-tie means the
+        top-1 pick is unreliable.
 
         Args:
             query_embedding: 512-d embedding (will be L2-normalised internally).
             threshold: Minimum cosine similarity to accept a match.
+            margin: Minimum gap between top-1 and top-2 identity scores.
+                    If the gap is smaller than this, the match is rejected.
+                    Set to 0.0 to disable the margin test.
+            top_k: Number of embedding candidates to retrieve before
+                   identity-level aggregation.  Must be >= 2 to enable the
+                   margin test; should comfortably exceed the max number of
+                   prototypes per identity in the gallery.
 
         Returns:
-            (best_id, best_score).  ``best_id`` is None if below threshold.
-            ``best_score`` is always the raw top-1 cosine score — use it to
-            log near-misses even when identity is None.
+            (best_id, best_score).  ``best_id`` is None if below threshold or
+            margin test fails.  ``best_score`` is always the raw top-1 identity
+            score so callers can log near-misses.
         """
         if self.stored_embeddings is None:
             return None, 0.0
@@ -75,18 +92,34 @@ class FaceDatabase:
         if norm > 0:
             q = q / norm
 
-        if self._use_faiss:
-            scores, indices = self._faiss_index.search(
-                q.reshape(1, -1), 1
-            )
-            best_score = float(scores[0][0])
-            best_id = self.ids[int(indices[0][0])]
-        else:
-            scores = np.dot(self.stored_embeddings, q)
-            best_idx = int(np.argmax(scores))
-            best_score = float(scores[best_idx])
-            best_id = self.ids[best_idx]
+        k = max(2, min(top_k, len(self.ids)))
 
-        if best_score >= threshold:
-            return best_id, best_score
-        return None, best_score
+        if self._use_faiss:
+            raw_scores, raw_indices = self._faiss_index.search(q.reshape(1, -1), k)
+            score_iter = zip(raw_scores[0], raw_indices[0])
+        else:
+            all_scores = np.dot(self.stored_embeddings, q)
+            top_indices = np.argsort(all_scores)[::-1][:k]
+            score_iter = ((float(all_scores[i]), i) for i in top_indices)
+
+        # Group by identity — keep the highest prototype score per person
+        identity_scores: dict = {}
+        for s, idx in score_iter:
+            identity = self.ids[int(idx)]
+            if identity not in identity_scores or s > identity_scores[identity]:
+                identity_scores[identity] = float(s)
+
+        # Sort identities by score descending
+        ranked = sorted(identity_scores.items(), key=lambda x: x[1], reverse=True)
+        best_id, best_score = ranked[0]
+
+        if best_score < threshold:
+            return None, best_score
+
+        # Margin test: reject if second-best identity is too close
+        if margin > 0.0 and len(ranked) >= 2:
+            second_score = ranked[1][1]
+            if best_score - second_score < margin:
+                return None, best_score
+
+        return best_id, best_score

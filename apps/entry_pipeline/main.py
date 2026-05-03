@@ -107,6 +107,8 @@ class CameraWorker:
         self.min_face_size: int = rec_cfg.get("min_face_size", 140)
         self.similarity_threshold: float = rec_cfg.get("similarity_threshold", 0.55)
         self.upgrade_margin: float = rec_cfg.get("upgrade_margin", 0.05)
+        self.match_margin: float = rec_cfg.get("match_margin", 0.05)
+        self.match_top_k: int = rec_cfg.get("match_top_k", 10)
 
         roi = camera_cfg.get("roi")
         self.roi: Optional[tuple] = tuple(roi) if roi and len(roi) == 4 else None
@@ -201,7 +203,8 @@ class CameraWorker:
 
             face.blur_score = blur
             pw = pose_weight(face.kps) if face.kps is not None else 1.0
-            face.quality_score = blur * face.confidence * pw
+            size_factor = min(face.width / 112.0, 1.0)
+            face.quality_score = blur * face.confidence * pw * size_factor
             valid_faces.append(face)
             aligned = (
                 align_face(frame, face.kps)
@@ -232,7 +235,8 @@ class CameraWorker:
                 continue
 
             identity, score = self.models.face_db.match(
-                consensus, self.similarity_threshold
+                consensus, self.similarity_threshold,
+                margin=self.match_margin, top_k=self.match_top_k,
             )
 
             # Always log at INFO so scores are visible for threshold tuning

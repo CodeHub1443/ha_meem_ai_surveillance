@@ -7,6 +7,8 @@ recognition:
   min_face_size: 60           # Minimum face width in pixels (original value)
   blur_threshold: 30           # Upper cap for adaptive threshold (original was 100; 80 gives leeway for smaller faces)
   upgrade_margin: 0.05         # Extra score above threshold required to upgrade UNKNOWN → AUTHORIZED
+  match_margin: 0.05           # Min gap between top-1 and top-2 identity scores; rejects near-ties
+  match_top_k: 10              # Embedding candidates retrieved before identity-level aggregation
 
 # Temporal fusion / aggregation
 fusion:
@@ -18,7 +20,7 @@ fusion:
 # Multi-object tracking
 tracking:
   iou_threshold: 0.3
-  max_age: 5                   # Frames a track can coast without a detection
+  max_age: 15                  # Frames a track can coast without a detection (~1s at 15fps)
 
 # Per-identity re-alert cooldown
 identity_cooldown_seconds: 6.0
