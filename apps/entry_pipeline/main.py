@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
+import yaml
 
 from core.database import FaceDatabase
 from core.detection import SCRFDDetector, Face
@@ -17,7 +18,7 @@ from core.quality import calculate_blur_score, AdaptiveBlurThreshold
 from core.recognition import AdaFaceRecognizer
 from core.tracking import SORTTracker
 from core.utils.config import load_config
-from core.utils.image import align_face
+from core.utils.image import align_face, pose_weight
 
 logging.basicConfig(
     level=logging.INFO,
@@ -105,6 +106,12 @@ class CameraWorker:
         self.models = models
         self.min_face_size: int = rec_cfg.get("min_face_size", 140)
         self.similarity_threshold: float = rec_cfg.get("similarity_threshold", 0.55)
+        self.upgrade_margin: float = rec_cfg.get("upgrade_margin", 0.05)
+
+        roi = camera_cfg.get("roi")
+        self.roi: Optional[tuple] = tuple(roi) if roi and len(roi) == 4 else None
+        if self.roi:
+            log.info(f"[{self.camera_id}] ROI active: x1={self.roi[0]} y1={self.roi[1]} x2={self.roi[2]} y2={self.roi[3]}")
 
         event_emitter = EventEmitter(
             camera_id=self.camera_id,
@@ -138,14 +145,23 @@ class CameraWorker:
         # ── 2. Tracking ───────────────────────────────────────────────
         tracked: List[Face] = self.tracker.update(faces)
 
-        # ── 3. Self-expiry: clean aggregator + state ───────────────────
+        # ── 3. ROI filter — discard faces whose centre falls outside the gate zone ──
+        if self.roi:
+            rx1, ry1, rx2, ry2 = self.roi
+            tracked = [
+                f for f in tracked
+                if rx1 <= (f.bbox[0] + f.bbox[2]) / 2 <= rx2
+                and ry1 <= (f.bbox[1] + f.bbox[3]) / 2 <= ry2
+            ]
+
+        # ── 4. Self-expiry: clean aggregator + state ───────────────────
         expired_ids = self.aggregator.expire_stale_tracks()
         for tid in expired_ids:
             self.state.release_track(tid)
             self._logged_size_reject.discard(tid)
             self._logged_blur_reject.discard(tid)
 
-        # ── 4. Quality gate + crop all valid faces ─────────────────────
+        # ── 5. Quality gate + crop all valid faces ─────────────────────
         valid_faces: List[Face] = []
         valid_crops: List[np.ndarray] = []
 
@@ -184,6 +200,8 @@ class CameraWorker:
             self._logged_blur_reject.discard(tid)
 
             face.blur_score = blur
+            pw = pose_weight(face.kps) if face.kps is not None else 1.0
+            face.quality_score = blur * face.confidence * pw
             valid_faces.append(face)
             aligned = (
                 align_face(frame, face.kps)
@@ -192,17 +210,21 @@ class CameraWorker:
             )
             valid_crops.append(aligned)
 
-        # ── 5. Batched recognition ────────────────────────────────────
+        # ── 6. Batched recognition ────────────────────────────────────
         if valid_crops:
             embeddings = self.models.recognizer.extract_embeddings_batch(valid_crops)
             for face, emb in zip(valid_faces, embeddings):
                 face.embedding = emb
 
-        # ── 6. Aggregation + matching ─────────────────────────────────
+        # ── 7. Aggregation + matching ─────────────────────────────────
         for face in valid_faces:
             self.aggregator.add_face(face)
 
-            if self.state.is_decided(face.track_id):
+            upgradeable = self.state.is_upgradeable(face.track_id)
+
+            # AUTHORIZED tracks are permanently closed; UNKNOWN tracks stay
+            # in play so a later frontal frame can upgrade them.
+            if self.state.is_decided(face.track_id) and not upgradeable:
                 continue
 
             consensus = self.aggregator.get_aggregated_embedding(face.track_id)
@@ -220,35 +242,48 @@ class CameraWorker:
                 f"(threshold={self.similarity_threshold})"
             )
 
-            if not self.state.can_alert(identity, face.track_id):
-                continue
+            if upgradeable:
+                # Require identity found AND score exceeds threshold by margin
+                if identity is None or score < self.similarity_threshold + self.upgrade_margin:
+                    continue
+                log.info(
+                    f"[{self.camera_id}] UPGRADE track={face.track_id}: "
+                    f"UNKNOWN → {identity} score={score:.4f}"
+                )
+                self.state.upgrade_track(face.track_id, identity)
+                emit_identity, emit_event = identity, "AUTHORIZED"
+            else:
+                if not self.state.can_alert(identity, face.track_id):
+                    continue
+                self.state.mark_decided(face.track_id, identity)
+                emit_identity = identity
+                emit_event = "AUTHORIZED" if identity else "UNKNOWN"
 
-            # ── 7. Emit event (async I/O) ──────────────────────────────
+            # ── 8. Emit event (async I/O) ──────────────────────────────
             event_data = {
                 "timestamp": frame_ts.isoformat(),
                 "camera_id": self.camera_id,
                 "track_id": face.track_id,
-                "identity": identity,
+                "identity": emit_identity,
                 "score": round(float(score), 4),
-                "event": "AUTHORIZED" if identity else "UNKNOWN",
+                "event": emit_event,
             }
             x1, y1, x2, y2 = face.bbox[:4].astype(int)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(
                 annotated,
-                identity or "UNKNOWN",
+                emit_identity or "UNKNOWN",
                 (x1, y1 - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
             )
-            self.io_worker.submit(annotated, event_data, identity, frame_ts)
-            self.state.mark_decided(face.track_id, identity)
+            self.io_worker.submit(annotated, event_data, emit_identity, frame_ts)
 
             log.info(
-                f"[{self.camera_id}] {event_data['event']}: "
-                f"{identity or 'Unknown'} score={score:.3f}"
+                f"[{self.camera_id}] {emit_event}: "
+                f"{emit_identity or 'Unknown'} score={score:.3f}"
             )
 
-        # ── 8. Visualise all tracked faces ────────────────────────────
+        # ── 9. Visualise all tracked faces ────────────────────────────
         for face in tracked:
             x1, y1, x2, y2 = face.bbox[:4].astype(int)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 200, 255), 1)
@@ -258,6 +293,13 @@ class CameraWorker:
                 (x1, y1 - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1,
             )
+
+        # ── 10. Draw ROI box on display ───────────────────────────────
+        if self.roi:
+            rx1, ry1, rx2, ry2 = (int(v) for v in self.roi)
+            cv2.rectangle(annotated, (rx1, ry1), (rx2, ry2), (0, 255, 255), 2)
+            cv2.putText(annotated, "Gate ROI", (rx1, ry1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         return annotated
 
@@ -309,8 +351,25 @@ class CameraWorker:
         with self._frame_lock:
             return self._display_frame.copy() if self._display_frame is not None else None
 
+    def set_roi(self, roi: Optional[list]):
+        self.roi = tuple(roi) if roi else None
+
     def stop(self):
         self.running = False
+
+
+# ── Persist ROI back to cameras.yaml ──────────────────────────────────────────
+
+def _save_roi(camera_id: str, roi: list, config_path: str = "configs/cameras.yaml"):
+    with open(config_path) as f:
+        data = yaml.safe_load(f) or {}
+    for cam in data.get("cameras", []):
+        if cam["id"] == camera_id:
+            cam["roi"] = [int(v) for v in roi] if roi else None
+            break
+    with open(config_path, "w") as f:
+        yaml.safe_dump(data, f, default_flow_style=None, sort_keys=False)
+    log.info(f"[{camera_id}] ROI {'cleared' if not roi else f'saved: {roi}'} → {config_path}")
 
 
 # ── Pipeline entry point ───────────────────────────────────────────────────────
@@ -320,7 +379,6 @@ def run_pipeline():
         "configs/default.yaml",
         "configs/thresholds.yaml",
     )
-    import yaml
     try:
         with open("configs/cameras.yaml") as f:
             camera_cfg = yaml.safe_load(f) or {}
@@ -333,7 +391,6 @@ def run_pipeline():
         log.error("No cameras defined in cameras.yaml")
         return
 
-    # Shared models (one load, all cameras)
     models = SharedModels(config)
 
     workers = [CameraWorker(cam, models, config) for cam in cameras]
@@ -342,9 +399,41 @@ def run_pipeline():
         for w in workers
     ]
 
+    # ── Per-camera mouse-draw state ────────────────────────────────────────────
+    # Each entry: {"drawing": bool, "start": (x,y)|None, "end": (x,y)|None}
+    draw_states = {w.camera_id: {"drawing": False, "start": None, "end": None}
+                   for w in workers}
+
+    def make_mouse_cb(worker: CameraWorker):
+        state = draw_states[worker.camera_id]
+
+        def cb(event, x, y, _flags, _param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                state["drawing"] = True
+                state["start"] = (x, y)
+                state["end"] = (x, y)
+            elif event == cv2.EVENT_MOUSEMOVE and state["drawing"]:
+                state["end"] = (x, y)
+            elif event == cv2.EVENT_LBUTTONUP and state["drawing"]:
+                state["drawing"] = False
+                state["end"] = (x, y)
+                x1, y1 = state["start"]
+                x2, y2 = state["end"]
+                roi = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+                worker.set_roi(roi)
+                _save_roi(worker.camera_id, roi)
+        return cb
+
     log.info(f"Starting {len(workers)} camera worker(s)…")
     for t in threads:
         t.start()
+
+    # Create named windows and attach mouse callbacks before the display loop
+    for w in workers:
+        win = f"Ha-Meem — {w.camera_name}"
+        cv2.namedWindow(win)
+        cv2.setMouseCallback(win, make_mouse_cb(w))
+    log.info("Tip: click and drag on a camera window to set its Gate ROI. Press 'r' to clear.")
 
     # Main thread owns all cv2.imshow calls (required on Windows)
     try:
@@ -352,14 +441,30 @@ def run_pipeline():
             any_alive = False
             for w in workers:
                 frame = w.get_display_frame()
-                if frame is not None:
-                    cv2.imshow(f"Ha-Meem — {w.camera_name}", frame)
-                    any_alive = True
+                if frame is None:
+                    continue
+                any_alive = True
+
+                # Overlay the in-progress rectangle while the user is dragging
+                state = draw_states[w.camera_id]
+                if state["drawing"] and state["start"] and state["end"]:
+                    cv2.rectangle(frame, state["start"], state["end"], (0, 255, 255), 2)
+
+                cv2.imshow(f"Ha-Meem — {w.camera_name}", frame)
+
             if not any_alive and not any(t.is_alive() for t in threads):
                 break
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 log.info("Quit signal received")
                 break
+            elif key == ord("r"):
+                # Clear ROI for all cameras
+                for w in workers:
+                    w.set_roi(None)
+                    _save_roi(w.camera_id, [])
+                log.info("All ROIs cleared")
     finally:
         for w in workers:
             w.stop()

@@ -1,0 +1,18 @@
+feat: core pipeline and dataset tool improvements
+
+Enhancements in Dataset Tools:
+- Added `apply_clahe` in `extract_faces.py` for improving contrast of underexposed faces before detection.
+- Updated `build_gallery.py` to skip blurry aligned crops before embedding.
+- Introduced outlier removal in gallery building to filter embeddings far from cluster mean.
+- Added inter-class proximity checks to warn about identities at risk of mutual confusion.
+
+Improvements in Core Pipeline:
+- Implemented logic to upgrade tracks from UNKNOWN to AUTHORIZED dynamically in `pipeline_state.py`.
+- Added `upgrade_margin` in `thresholds.yaml` to configure track upgrading requirements.
+- Introduced `pose_weight` in `image.py` to calculate facial pose estimation (frontal vs profile) and weigh sharper, frontal frames higher during temporal consensus.
+- Refactored `aggregator.py` to use `quality_scores` instead of just blur scores.
+
+UI and Configuration Enhancements:
+- Added real-time yellow rectangle overlay when dragging ROI in `main.py`.
+- Added hotkey 'r' to clear ROIs for all cameras instantly.
+- Configured initial ROI for camera 01 and updated camera configs.

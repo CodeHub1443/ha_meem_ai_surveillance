@@ -1,5 +1,6 @@
 import os
 import cv2
+import numpy as np
 import yaml
 import sys
 from pathlib import Path
@@ -9,6 +10,21 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from core.detection import SCRFDDetector
 from core.utils.image import align_face
+
+
+def apply_clahe(frame: np.ndarray) -> np.ndarray:
+    """Improve local contrast via CLAHE on the L channel (LAB colour space).
+
+    Lifts underexposed faces (dark skin / poor lighting) without
+    overexposing already-bright regions.  Applied to the full frame
+    before detection so SCRFD and the aligner both see better contrast.
+    """
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
 
 def load_config():
     """Load and merge configuration files identically to main pipeline."""
@@ -98,7 +114,9 @@ def main():
             frame = cv2.imread(str(img_path))
             if frame is None:
                 continue
-                
+
+            frame = apply_clahe(frame)
+
             # Detect faces using SCRFD
             faces = detector.detect(frame)
             

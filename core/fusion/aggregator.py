@@ -68,7 +68,7 @@ class EmbeddingAggregator:
             }
 
         buf = self.track_buffers[tid]
-        buf["entries"].append((face.embedding, face.blur_score, now))
+        buf["entries"].append((face.embedding, face.quality_score, now))
         buf["last_updated"] = now
 
         if len(buf["entries"]) > self.buffer_size:
@@ -100,7 +100,7 @@ class EmbeddingAggregator:
         # --- Build combined weights (quality × recency) ---
         n = len(entries)
         embeddings = np.stack([e[0] for e in entries])          # (N, 512)
-        blur_scores = np.array([e[1] for e in entries], dtype=np.float64)
+        quality_scores = np.array([e[1] for e in entries], dtype=np.float64)
 
         # Recency weights: oldest frame = decay^(n-1), newest = 1.0
         recency_weights = np.array(
@@ -108,7 +108,7 @@ class EmbeddingAggregator:
             dtype=np.float64,
         )
 
-        combined = blur_scores * recency_weights
+        combined = quality_scores * recency_weights
         total = combined.sum()
         weights = combined / total if total > 0 else np.ones(n) / n
 

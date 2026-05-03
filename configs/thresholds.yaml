@@ -6,6 +6,7 @@ recognition:
   similarity_threshold: 0.60
   min_face_size: 60           # Minimum face width in pixels (original value)
   blur_threshold: 30           # Upper cap for adaptive threshold (original was 100; 80 gives leeway for smaller faces)
+  upgrade_margin: 0.05         # Extra score above threshold required to upgrade UNKNOWN → AUTHORIZED
 
 # Temporal fusion / aggregation
 fusion:

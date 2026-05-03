@@ -8,9 +8,21 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from core.recognition import AdaFaceRecognizer
+from core.quality.blur import calculate_blur_score
 
 # Maximum prototype embeddings kept per identity after k-means clustering.
 MAX_PROTOTYPES = 10
+
+# Aligned 112×112 crops below this blur score are skipped before embedding.
+MIN_CROP_BLUR = 15.0
+
+# Embeddings with cosine similarity to their cluster mean below this are
+# treated as outliers (misaligned / occluded frames) and removed.
+OUTLIER_SIM_THRESHOLD = 0.25
+
+# Pairs of identities whose prototypes come within this cosine similarity
+# are flagged — they are at risk of mutual confusion at runtime.
+INTER_CLASS_WARNING_THRESHOLD = 0.50
 
 
 def _load_config():
@@ -91,17 +103,26 @@ def main():
         person_id = person_path.name
         raw_embeddings = []
 
+        skipped_blur = 0
         for img_path in person_path.iterdir():
             if img_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
                 continue
             img = cv2.imread(str(img_path))
             if img is None:
                 continue
+
+            # Skip blurry aligned crops before embedding
+            blur = calculate_blur_score(img)
+            if blur < MIN_CROP_BLUR:
+                skipped_blur += 1
+                continue
+
             emb = recognizer.extract_embedding(img)
             raw_embeddings.append(emb)
             total_images += 1
 
         if not raw_embeddings:
+            print(f"  {person_id:25s} | WARNING: no usable images (all blurry?)")
             continue
 
         # Stack and normalise
@@ -109,15 +130,34 @@ def main():
         norms = np.linalg.norm(stacked, axis=1, keepdims=True)
         normalised = stacked / np.where(norms > 0, norms, 1.0)
 
+        # Outlier removal: drop embeddings too far from the cluster mean
+        removed_outliers = 0
+        if len(normalised) > 2:
+            mean_emb = normalised.mean(axis=0)
+            mean_emb /= max(np.linalg.norm(mean_emb), 1e-6)
+            sims = normalised @ mean_emb
+            mask = sims >= OUTLIER_SIM_THRESHOLD
+            if mask.sum() == 0:
+                mask = sims >= sims.max() - 0.05
+            removed_outliers = int((~mask).sum())
+            normalised = normalised[mask]
+
         # Cluster into at most MAX_PROTOTYPES representative prototypes
         prototypes = _kmeans_prototypes(normalised, MAX_PROTOTYPES)
 
         gallery[person_id] = [prototypes[i] for i in range(len(prototypes))]
         persons_processed += 1
 
+        notes = []
+        if skipped_blur:
+            notes.append(f"blur_skip={skipped_blur}")
+        if removed_outliers:
+            notes.append(f"outliers_removed={removed_outliers}")
+        note_str = f"  [{', '.join(notes)}]" if notes else ""
+
         print(
             f"  {person_id:25s} | raw images: {len(raw_embeddings):4d} "
-            f"→ prototypes: {len(gallery[person_id])}"
+            f"→ prototypes: {len(gallery[person_id])}{note_str}"
         )
 
     output_path = Path(
@@ -131,6 +171,25 @@ def main():
     print(f"Total images used : {total_images}")
     print(f"Identities saved  : {len(gallery)}")
     print(f"Output            : {output_path}")
+
+    # Inter-class proximity check — flag identity pairs at risk of confusion
+    ids = list(gallery.keys())
+    warnings = []
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = ids[i], ids[j]
+            pa = np.stack(gallery[a])
+            pb = np.stack(gallery[b])
+            max_sim = float((pa @ pb.T).max())
+            if max_sim >= INTER_CLASS_WARNING_THRESHOLD:
+                warnings.append((max_sim, a, b))
+
+    if warnings:
+        print("\nInter-class proximity warnings (risk of confusion):")
+        for sim, a, b in sorted(warnings, reverse=True):
+            print(f"  {a} ↔ {b}  max_sim={sim:.3f}")
+    else:
+        print("\nNo inter-class proximity issues found.")
     print("-" * 50)
 
 
