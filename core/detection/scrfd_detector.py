@@ -17,7 +17,7 @@ class SCRFDDetector(BaseDetector):
         # insightface expects the file to exist, it doesn't need providers passed manually 
         # as it handles it internally via the context.
         self.detector = get_model(model_path, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-        self.detector.prepare(ctx_id=0 if self.device == 'cuda' else -1, input_size=(640, 640))
+        self.detector.prepare(ctx_id=0 if self.device == 'cuda' else -1, det_thresh=self.min_confidence, input_size=(640, 640))
 
     def detect(self, image: np.ndarray) -> List[Face]:
         """Runs inference using insightface and returns Face objects."""
