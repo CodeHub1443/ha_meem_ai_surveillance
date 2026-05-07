@@ -198,6 +198,14 @@ class CameraWorker:
             blur = calculate_blur_score(crop)
             self.blur_threshold.update(blur)
 
+            # Permanently decided tracks (AUTHORIZED, not upgradeable) need no
+            # further processing — their snapshot was already saved at decision
+            # time and re-running recognition on them wastes CPU and GPU cycles.
+            # UNKNOWN upgradeable tracks are NOT skipped: they still need
+            # embeddings so a later frontal frame can upgrade them to AUTHORIZED.
+            if self.state.is_decided(tid) and not self.state.is_upgradeable(tid):
+                continue
+
             if face.width < self.min_face_size:
                 if tid not in self._logged_size_reject:
                     log.info(
