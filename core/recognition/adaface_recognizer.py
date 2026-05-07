@@ -1,9 +1,23 @@
+import os
+import sys
+import logging
 import cv2
 import numpy as np
 import onnxruntime as ort
 from typing import List
 
 from .base_recognizer import BaseRecognizer
+
+# Windows: TensorRT pip package puts its DLLs in a non-standard location.
+# Prepend tensorrt_libs to PATH before onnxruntime loads its providers.
+if sys.platform == "win32":
+    _trt_lib_dir = os.path.normpath(
+        os.path.join(os.path.dirname(sys.executable), "..", "lib", "site-packages", "tensorrt_libs")
+    )
+    if os.path.isdir(_trt_lib_dir) and _trt_lib_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _trt_lib_dir + os.pathsep + os.environ.get("PATH", "")
+
+log = logging.getLogger(__name__)
 
 
 class AdaFaceRecognizer(BaseRecognizer):
@@ -13,27 +27,57 @@ class AdaFaceRecognizer(BaseRecognizer):
     first; if the ONNX model was exported with a fixed batch size of 1 the
     session.run() call will raise, and we fall back to sequential processing
     transparently.
+
+    When ``config["tensorrt"]["enabled"]`` is true and device is cuda,
+    TensorRT Execution Provider is prepended — FP16 engine is compiled on first
+    run (~60-120 s) then loaded from disk cache on subsequent runs (~10 ms).
+    Falls back to CUDAExecutionProvider if TRT is disabled or unavailable.
     """
 
     def __init__(self, config: dict, model_path: str):
         super().__init__(config)
-        providers = (
-            ["CPUExecutionProvider"]
-            if self.device == "cpu"
-            else ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        )
-        # Suppress ORT shape-mismatch warnings that fire when sending batch>1
-        # to a model exported with static batch_size=1.
+
+        trt_cfg = config.get("tensorrt", {})
+
+        if self.device == "cpu":
+            providers = ["CPUExecutionProvider"]
+        else:
+            providers = []
+            if trt_cfg.get("enabled", False):
+                cache_path = trt_cfg.get("engine_cache_path", "./trt_cache")
+                os.makedirs(cache_path, exist_ok=True)
+                trt_opts = {
+                    "trt_fp16_enable": trt_cfg.get("fp16", True),
+                    "trt_engine_cache_enable": trt_cfg.get("engine_cache_enable", True),
+                    "trt_engine_cache_path": cache_path,
+                    "trt_max_workspace_size": trt_cfg.get("max_workspace_size", 1073741824),
+                    "trt_dla_enable": trt_cfg.get("dla_enable", False),
+                }
+                providers.append(("TensorrtExecutionProvider", trt_opts))
+            providers.append(("CUDAExecutionProvider", {"device_id": 0}))
+            providers.append("CPUExecutionProvider")
+
         sess_opts = ort.SessionOptions()
-        sess_opts.log_severity_level = 3  # 3 = ERROR only; suppress WARNING (2)
+        sess_opts.log_severity_level = 3  # ERROR only; suppress WARNING (2)
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        n_threads = config.get("models", {}).get("ort_intra_threads", 2)
+        sess_opts.intra_op_num_threads = n_threads
         self.session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=providers)
         self.input_name = self.session.get_inputs()[0].name
         self.input_shape = (112, 112)
 
+        active = self.session.get_providers()
+        if "TensorrtExecutionProvider" in active:
+            log.info("AdaFaceRecognizer: TensorRT backend ACTIVE (FP16=%s, cache=%s)",
+                     trt_cfg.get("fp16", True), trt_cfg.get("engine_cache_path", "./trt_cache"))
+        elif "CUDAExecutionProvider" in active:
+            log.info("AdaFaceRecognizer: CUDA backend active (TensorRT not available — install tensorrt-cu12)")
+        else:
+            log.info("AdaFaceRecognizer: CPU backend active")
+        log.debug("AdaFaceRecognizer full provider list: %s", active)
+
         # Detect whether the model supports dynamic batching.
-        # ONNX models exported with a fixed batch dim (integer > 0, not None/-1)
-        # will warn on every batch>1 call. In that case we fall back to
-        # sequential inference to keep the log clean.
+        # Fixed batch_size=1 models warn on every batch>1 call — use sequential path instead.
         batch_dim = self.session.get_inputs()[0].shape[0]
         self._dynamic_batch: bool = not (isinstance(batch_dim, int) and batch_dim > 0)
 
@@ -88,10 +132,10 @@ class AdaFaceRecognizer(BaseRecognizer):
             try:
                 embeddings = self.session.run(None, {self.input_name: batch})[0]
                 return self._l2_normalize(embeddings)
-            except Exception:
-                pass  # fall through to sequential
+            except Exception as _e:
+                log.debug("Batch inference fell back to sequential: %s", _e)
 
-        # Sequential path — safe for any model export
+        # Sequential path — safe for any model export and fixed TRT engine shapes
         embeddings = np.stack(
             [self.session.run(None, {self.input_name: self._preprocess_one(img)})[0][0]
              for img in face_imgs]

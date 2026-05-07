@@ -2,7 +2,18 @@
   "permissions": {
     "allow": [
       "Bash(python3 -c ' *)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(xargs wc *)",
+      "Bash(python -c \"import psutil; print\\('psutil', psutil.__version__\\)\")",
+      "Bash(python -c \"import pynvml; print\\('pynvml ok'\\)\")",
+      "Bash(python -c \"import nvidia_smi; print\\('nvidia-smi ok'\\)\")",
+      "Bash(python -c \"import subprocess; r = subprocess.run\\(['nvidia-smi', '--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu', '--format=csv,noheader'], capture_output=True, text=True\\); print\\(r.stdout\\)\")",
+      "Bash(python tools/profiler.py --duration 30 --interval 2 --no-csv)",
+      "Bash(python tools/profiler.py --pid 22328 --duration 30 --interval 2 --no-csv)",
+      "Bash(python tools/profiler.py --pid 7296 --duration 30 --interval 2 --no-csv)",
+      "Bash(python tools/profiler.py --pid 3648 --duration 40 --interval 2)",
+      "Bash(python tools/profiler.py --pid 24052 --duration 40 --interval 2)",
+      "Bash(python tools/profiler.py --pid 11288 --duration 40 --interval 2)"
     ]
   }
 }
