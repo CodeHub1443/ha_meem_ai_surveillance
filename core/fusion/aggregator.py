@@ -1,4 +1,5 @@
 import time
+import threading
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 
@@ -16,6 +17,9 @@ class EmbeddingAggregator:
     - Self-expiring buffers: tracks not updated within
       ``expire_after_seconds`` are pruned automatically, eliminating the
       manual cleanup in the main loop and preventing memory leaks.
+
+    Thread-safe: all public methods acquire an internal lock so concurrent
+    camera workers never race on ``track_buffers``.
     """
 
     def __init__(
@@ -47,6 +51,7 @@ class EmbeddingAggregator:
         # track_id → {entries, first_seen, last_updated}
         # entries: list of (embedding, blur_score, timestamp)
         self.track_buffers: Dict[int, Dict] = {}
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Write path
@@ -60,19 +65,20 @@ class EmbeddingAggregator:
         now = time.time()
         tid = face.track_id
 
-        if tid not in self.track_buffers:
-            self.track_buffers[tid] = {
-                "entries": [],
-                "first_seen": now,
-                "last_updated": now,
-            }
+        with self._lock:
+            if tid not in self.track_buffers:
+                self.track_buffers[tid] = {
+                    "entries": [],
+                    "first_seen": now,
+                    "last_updated": now,
+                }
 
-        buf = self.track_buffers[tid]
-        buf["entries"].append((face.embedding, face.quality_score, now))
-        buf["last_updated"] = now
+            buf = self.track_buffers[tid]
+            buf["entries"].append((face.embedding, face.quality_score, now))
+            buf["last_updated"] = now
 
-        if len(buf["entries"]) > self.buffer_size:
-            buf["entries"].pop(0)
+            if len(buf["entries"]) > self.buffer_size:
+                buf["entries"].pop(0)
 
     # ------------------------------------------------------------------
     # Read path
@@ -84,14 +90,16 @@ class EmbeddingAggregator:
         Returns None if the track has insufficient data or has not been
         observed long enough.
         """
-        if track_id not in self.track_buffers:
-            return None
+        with self._lock:
+            if track_id not in self.track_buffers:
+                return None
+            buf = self.track_buffers[track_id]
+            # Snapshot entries so we can compute outside the lock
+            entries: List[Tuple[np.ndarray, float, float]] = list(buf["entries"])
+            first_seen = buf["first_seen"]
 
-        buf = self.track_buffers[track_id]
-        entries: List[Tuple[np.ndarray, float, float]] = buf["entries"]
-
-        # --- Decision gate ---
-        elapsed = time.time() - buf["first_seen"]
+        # --- Decision gate (outside lock — pure computation) ---
+        elapsed = time.time() - first_seen
         if elapsed < self.min_decision_seconds:
             return None
         if len(entries) < max(self.min_frames, 2):
@@ -128,15 +136,17 @@ class EmbeddingAggregator:
         downstream state (e.g. ``PipelineState.decided_tracks``).
         """
         now = time.time()
-        stale = [
-            tid
-            for tid, buf in self.track_buffers.items()
-            if now - buf["last_updated"] > self.expire_after_seconds
-        ]
-        for tid in stale:
-            del self.track_buffers[tid]
+        with self._lock:
+            stale = [
+                tid
+                for tid, buf in self.track_buffers.items()
+                if now - buf["last_updated"] > self.expire_after_seconds
+            ]
+            for tid in stale:
+                del self.track_buffers[tid]
         return stale
 
     def clear_track(self, track_id: int):
         """Explicitly remove a single track's buffer."""
-        self.track_buffers.pop(track_id, None)
+        with self._lock:
+            self.track_buffers.pop(track_id, None)

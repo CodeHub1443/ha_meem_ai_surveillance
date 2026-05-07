@@ -9,3 +9,4 @@ logging:
 models:
   scrfd_onnx: models/exported/scrfd_10g_bnkps.onnx
   adaface_onnx: models/exported/adaface.onnx
+  ort_intra_threads: 2         # ORT CPU threads per inference call; prevents competition with camera threads

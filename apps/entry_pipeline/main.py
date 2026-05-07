@@ -1,7 +1,14 @@
+# Must be set before onnxruntime is imported (affects ALL ORT sessions including insightface)
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("ORT_NUM_THREADS", "2")
+
 import logging
+import shutil
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Optional
 
 import cv2
@@ -40,7 +47,6 @@ class SharedModels:
         self.recognizer = AdaFaceRecognizer(config, config["models"]["adaface_onnx"])
 
         log.info("Loading face gallery…")
-        import yaml
         dataset_cfg = {}
         try:
             with open("configs/dataset.yaml") as f:
@@ -50,7 +56,20 @@ class SharedModels:
         gallery_path = dataset_cfg.get("dataset", {}).get(
             "gallery_embeddings", "dataset/gallery_embeddings.npy"
         )
-        gallery = np.load(gallery_path, allow_pickle=True).item()
+        try:
+            gallery = np.load(gallery_path, allow_pickle=True).item()
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"Gallery file not found: '{gallery_path}'. "
+                "Build the gallery with the dataset tool before starting the pipeline."
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load gallery from '{gallery_path}': {exc}") from exc
+        if not gallery:
+            raise RuntimeError(
+                f"Gallery at '{gallery_path}' is empty — no identities enrolled. "
+                "Enroll at least one person before starting the pipeline."
+            )
         self.face_db = FaceDatabase(gallery)
         log.info(f"Gallery loaded: {len(gallery)} identities")
 
@@ -312,44 +331,89 @@ class CameraWorker:
     # ------------------------------------------------------------------
 
     def run(self):
-        cap = cv2.VideoCapture(self.url)
-        if not cap.isOpened():
-            log.error(f"[{self.camera_id}] Cannot open stream: {self.url}")
-            return
-
         self.running = True
-        log.info(f"[{self.camera_id}] Stream started — {self.camera_name}")
+        _RECONNECT_DELAYS = [5, 10, 30]  # seconds between attempts
 
         while self.running:
-            try:
-                ret, frame = cap.read()
-                if not ret:
-                    log.warning(f"[{self.camera_id}] Frame read failed — stream ended")
-                    break
+            cap = cv2.VideoCapture(self.url)
+            if not cap.isOpened():
+                log.error(f"[{self.camera_id}] Cannot open stream: {self.url}")
+                cap.release()
+                self._reconnect_with_backoff(_RECONNECT_DELAYS)
+                continue
 
-                frame_ts = datetime.now()
-                t0 = time.perf_counter()
+            log.info(f"[{self.camera_id}] Stream started — {self.camera_name}")
+            consecutive_failures = 0
+            consecutive_proc_errors = 0
+            _MAX_PROC_ERRORS = 10
 
-                annotated = self._process_frame(frame, frame_ts)
+            while self.running:
+                try:
+                    ret, frame = cap.read()
+                    if not ret:
+                        consecutive_failures += 1
+                        if consecutive_failures >= 5:
+                            log.warning(
+                                f"[{self.camera_id}] {consecutive_failures} consecutive read "
+                                "failures — reconnecting"
+                            )
+                            break
+                        continue
 
-                fps = 1.0 / max(time.perf_counter() - t0, 1e-6)
-                cv2.putText(
-                    annotated,
-                    f"{self.camera_id}  FPS:{fps:.1f}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 80, 0), 2,
-                )
+                    consecutive_failures = 0
+                    frame_ts = datetime.now()
+                    t0 = time.perf_counter()
 
-                with self._frame_lock:
-                    self._display_frame = annotated
+                    # Main processing step: detection, tracking, recognition, and event generation
+                    annotated = self._process_frame(frame, frame_ts)
+                    consecutive_proc_errors = 0
 
-            except Exception as e:
-                log.error(f"[{self.camera_id}] Frame processing error: {e}", exc_info=True)
+                    # Calculate FPS for display
+                    fps = 1.0 / max(time.perf_counter() - t0, 1e-6)
+                    cv2.putText(
+                        annotated,
+                        f"{self.camera_id}  FPS:{fps:.1f}",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 80, 0), 2,
+                    )
 
-        cap.release()
+                    with self._frame_lock:
+                        self._display_frame = annotated
+
+                except Exception as e:
+                    consecutive_proc_errors += 1
+                    log.error(f"[{self.camera_id}] Frame processing error: {e}", exc_info=True)
+                    if consecutive_proc_errors >= _MAX_PROC_ERRORS:
+                        log.error(
+                            f"[{self.camera_id}] {_MAX_PROC_ERRORS} consecutive processing "
+                            "errors — reconnecting"
+                        )
+                        break
+
+            cap.release()
+            if self.running:
+                self._reconnect_with_backoff(_RECONNECT_DELAYS)
+
         self.io_worker.stop()
-        self.running = False
         log.info(f"[{self.camera_id}] Worker stopped")
+
+    def _reconnect_with_backoff(self, delays: list):
+        """Wait with escalating delays before the next reconnect attempt.
+        
+        This prevents the system from hammering a down camera or network interface
+        and allows for self-recovery during transient failures.
+        """
+        for i, delay in enumerate(delays):
+            log.info(
+                f"[{self.camera_id}] Reconnecting in {delay}s "
+                f"(attempt {i + 1}/{len(delays)})…"
+            )
+            for _ in range(delay):
+                if not self.running:
+                    return
+                time.sleep(1)
+            return
+        log.error(f"[{self.camera_id}] All reconnect attempts exhausted — worker exiting")
 
     def get_display_frame(self) -> Optional[np.ndarray]:
         with self._frame_lock:
@@ -360,6 +424,28 @@ class CameraWorker:
 
     def stop(self):
         self.running = False
+
+
+# ── Snapshot retention cleanup ────────────────────────────────────────────────
+
+def _cleanup_old_snapshots(base_dir: str = "snapshots", keep_days: int = 30):
+    """Delete snapshot date-folders older than keep_days. Safe to call at startup."""
+    base = Path(base_dir)
+    if not base.exists():
+        return
+    cutoff = datetime.now() - timedelta(days=keep_days)
+    deleted = 0
+    for folder in base.iterdir():
+        if not folder.is_dir():
+            continue
+        try:
+            if datetime.strptime(folder.name, "%Y-%m-%d") < cutoff:
+                shutil.rmtree(folder)
+                deleted += 1
+        except ValueError:
+            pass  # folder name doesn't match date pattern — leave it alone
+    if deleted:
+        log.info("Snapshot cleanup: removed %d folder(s) older than %d days", deleted, keep_days)
 
 
 # ── Persist ROI back to cameras.yaml ──────────────────────────────────────────
@@ -382,6 +468,7 @@ def run_pipeline():
     config = load_config(
         "configs/default.yaml",
         "configs/thresholds.yaml",
+        "configs/tensorrt.yaml",
     )
     try:
         with open("configs/cameras.yaml") as f:
@@ -394,6 +481,11 @@ def run_pipeline():
     if not cameras:
         log.error("No cameras defined in cameras.yaml")
         return
+
+    _cleanup_old_snapshots(
+        base_dir="snapshots",
+        keep_days=config.get("snapshots", {}).get("keep_days", 30),
+    )
 
     models = SharedModels(config)
 
@@ -441,7 +533,7 @@ def run_pipeline():
 
     # Main thread owns all cv2.imshow calls (required on Windows)
     try:
-        while any(w.running or not t.is_alive() is False for w, t in zip(workers, threads)):
+        while any(w.running or t.is_alive() for w, t in zip(workers, threads)):
             any_alive = False
             for w in workers:
                 frame = w.get_display_frame()

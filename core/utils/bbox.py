@@ -15,13 +15,38 @@ def calculate_iou(bbox1: np.ndarray, bbox2: np.ndarray) -> float:
 
 
 def iou_matrix(bboxes_a: np.ndarray, bboxes_b: np.ndarray) -> np.ndarray:
-    """Compute IoU matrix between two sets of boxes. Returns shape (N, M)."""
-    n, m = len(bboxes_a), len(bboxes_b)
-    matrix = np.zeros((n, m), dtype=np.float32)
-    for i in range(n):
-        for j in range(m):
-            matrix[i, j] = calculate_iou(bboxes_a[i], bboxes_b[j])
-    return matrix
+    """Compute IoU matrix between two sets of boxes. Returns shape (N, M).
+
+    Fully vectorised with NumPy broadcasting — no Python loops.
+    
+    This implementation calculates the overlap between every box in set A and
+    every box in set B simultaneously, significantly improving performance
+    for high-density frames.
+    """
+    if len(bboxes_a) == 0 or len(bboxes_b) == 0:
+        return np.zeros((len(bboxes_a), len(bboxes_b)), dtype=np.float32)
+
+    a = np.asarray(bboxes_a, dtype=np.float32)  # (N, 4+)
+    b = np.asarray(bboxes_b, dtype=np.float32)  # (M, 4+)
+
+    # Intersection coordinates
+    inter_x1 = np.maximum(a[:, 0:1], b[:, 0])  # (N, M)
+    inter_y1 = np.maximum(a[:, 1:2], b[:, 1])
+    inter_x2 = np.minimum(a[:, 2:3], b[:, 2])
+    inter_y2 = np.minimum(a[:, 3:4], b[:, 3])
+    
+    # Intersection dimensions (clamp to 0 for non-overlapping boxes)
+    inter_w = np.maximum(0.0, inter_x2 - inter_x1)
+    inter_h = np.maximum(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h  # (N, M)
+
+    # Union = AreaA + AreaB - Intersection
+    area_a = (a[:, 2] - a[:, 0]) * (a[:, 3] - a[:, 1])  # (N,)
+    area_b = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])  # (M,)
+    union_area = area_a[:, np.newaxis] + area_b[np.newaxis, :] - inter_area
+
+    # Avoid division by zero with small epsilon
+    return (inter_area / (union_area + 1e-6)).astype(np.float32)
 
 
 def clip_bbox(bbox: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:

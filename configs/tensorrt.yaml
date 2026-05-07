@@ -1,0 +1,21 @@
+# TensorRT Execution Provider configuration
+# Applies when pipeline.device: cuda
+# Set enabled: false to fall back to plain CUDAExecutionProvider
+
+tensorrt:
+  enabled: true
+
+  # FP16 precision — ~2x speedup over FP32, negligible accuracy loss for face recognition
+  fp16: true
+
+  # Engine cache — TRT compiles the engine on first run (~60-120 s), then caches it.
+  # Subsequent runs load instantly. Delete cache if you change GPU or TRT version.
+  engine_cache_enable: true
+  engine_cache_path: "./trt_cache"
+
+  # GPU memory budget for TRT optimizer (bytes). 1 GB default; raise to 2 GB if OOM.
+  max_workspace_size: 1073741824
+
+  # DLA core — Jetson only; keep false on desktop/server GPUs
+  dla_enable: false
+  dla_core: 0

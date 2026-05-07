@@ -1,13 +1,17 @@
 import asyncio
 import json
+import logging
 import os
 import threading
+import time
 from collections import deque
 from typing import AsyncGenerator, List, Optional
 
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="Ha-Meem AI Surveillance API")
 
@@ -34,7 +38,7 @@ def _load_existing_events():
                 if line:
                     _event_cache.append(json.loads(line))
     except Exception as e:
-        print(f"[api] Failed to pre-load events: {e}")
+        log.error("Failed to pre-load events: %s", e)
 
 
 def _tail_log_file():
@@ -59,7 +63,7 @@ def _tail_log_file():
                                     _event_cache.append(event)
                                 # Notify SSE subscribers
                                 with _sse_lock:
-                                    for q in _sse_subscribers:
+                                    for q in list(_sse_subscribers):
                                         try:
                                             q.put_nowait(event)
                                         except asyncio.QueueFull:
@@ -68,11 +72,11 @@ def _tail_log_file():
                                 pass
                     last_size = size
                 elif size < last_size:
-                    # File was rotated/truncated
+                    # File was rotated/truncated — reset position
                     last_size = 0
         except Exception as e:
-            print(f"[api] Log tail error: {e}")
-        threading.Event().wait(timeout=1.0)
+            log.error("Log tail error: %s", e)
+        time.sleep(1.0)
 
 
 # ── Startup ────────────────────────────────────────────────────────────────────
@@ -149,7 +153,7 @@ def get_latest_events(
     identity: Optional[str] = Query(default=None),
     event_type: Optional[str] = Query(default=None, description="AUTHORIZED or UNKNOWN"),
 ):
-    """Most recent N events, with optional filtering."""
+    """Most recent N events, newest first, with optional filtering."""
     events = _filtered_events(camera_id, identity, event_type, None)
     return events[-limit:]
 
@@ -162,9 +166,9 @@ def get_all_events(
     event_type: Optional[str] = Query(default=None),
     since: Optional[str] = Query(default=None, description="ISO timestamp lower bound"),
 ):
-    """All cached events with optional filtering."""
+    """Most recent N cached events with optional filtering."""
     events = _filtered_events(camera_id, identity, event_type, since)
-    return events[:limit]
+    return events[-limit:]
 
 
 @app.get("/events/stream")
