@@ -13,7 +13,21 @@
       "Bash(python tools/profiler.py --pid 7296 --duration 30 --interval 2 --no-csv)",
       "Bash(python tools/profiler.py --pid 3648 --duration 40 --interval 2)",
       "Bash(python tools/profiler.py --pid 24052 --duration 40 --interval 2)",
-      "Bash(python tools/profiler.py --pid 11288 --duration 40 --interval 2)"
+      "Bash(python tools/profiler.py --pid 11288 --duration 40 --interval 2)",
+      "Bash(C:/Users/acer/AppData/Local/Programs/Python/Python310/python.exe -c ' *)",
+      "Bash(\"C:/Users/acer/AppData/Local/Programs/Python/Python310/python.exe\" -m pip list)",
+      "Bash(\"C:/Users/acer/AppData/Local/Programs/Python/Python310/python.exe\" -m pip install faiss-gpu)",
+      "Bash(\"C:/Users/acer/AppData/Local/Programs/Python/Python310/python.exe\" -m pip install faiss-cpu)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Force | Select-Object Name, @{Name=\"Type\";Expression={if\\($_.PSIsContainer\\){\"Dir\"}else{\"File\"}}} | Format-Table -AutoSize)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\apps\" -Recurse -Force | Select-Object FullName | ForEach-Object { $_.FullName.Replace\\(\"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\\", \"\"\\) })",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\core\" -Recurse -Force | Select-Object FullName | ForEach-Object { $_.FullName.Replace\\(\"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\\", \"\"\\) })",
+      "Read(//c/Users/acer/Desktop/TDI/Ha-meem/Front_end/**)",
+      "Bash(Get-ChildItem -Recurse -Force)",
+      "Bash(Select-Object FullName)",
+      "PowerShell(head -200)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Force | Select-Object Name, @{Name=\"Type\";Expression={if\\($_.PSIsContainer\\){\"DIR\"}else{\"FILE\"}}} | Format-Table -AutoSize)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\apps\" -Directory | ForEach-Object { \"{0}\" -f $_.Name })",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\core\" -Directory | ForEach-Object { \"{0}\" -f $_.Name })"
     ]
   }
 }

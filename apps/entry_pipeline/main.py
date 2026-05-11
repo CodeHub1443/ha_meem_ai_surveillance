@@ -11,6 +11,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
+from core import frame_buffer as _fb
+
+_STREAM_FPS = 15
+_STREAM_INTERVAL = 1.0 / _STREAM_FPS
+_STREAM_WIDTH = 960
+_STREAM_HEIGHT = 540
+
 import cv2
 import numpy as np
 import yaml
@@ -152,6 +159,8 @@ class CameraWorker:
         self._display_frame: Optional[np.ndarray] = None
         self._frame_lock = threading.Lock()
         self.running = False
+
+        self._last_stream_ts: float = 0.0
 
     # ------------------------------------------------------------------
     # Per-frame processing
@@ -342,6 +351,10 @@ class CameraWorker:
         self.running = True
         _RECONNECT_DELAYS = [5, 10, 30]  # seconds between attempts
 
+        if not self.url:
+            log.warning(f"[{self.camera_id}] No URL configured — worker exiting.")
+            return
+
         while self.running:
             cap = cv2.VideoCapture(self.url)
             if not cap.isOpened():
@@ -387,6 +400,18 @@ class CameraWorker:
 
                     with self._frame_lock:
                         self._display_frame = annotated
+
+                    # Throttled encode + push to in-memory frame buffer
+                    now_s = time.perf_counter()
+                    if now_s - self._last_stream_ts >= _STREAM_INTERVAL:
+                        self._last_stream_ts = now_s
+                        try:
+                            small = cv2.resize(annotated, (_STREAM_WIDTH, _STREAM_HEIGHT))
+                            ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                            if ok:
+                                _fb.put(self.camera_id, buf.tobytes())
+                        except Exception:
+                            pass
 
                 except Exception as e:
                     consecutive_proc_errors += 1
@@ -503,78 +528,24 @@ def run_pipeline():
         for w in workers
     ]
 
-    # ── Per-camera mouse-draw state ────────────────────────────────────────────
-    # Each entry: {"drawing": bool, "start": (x,y)|None, "end": (x,y)|None}
-    draw_states = {w.camera_id: {"drawing": False, "start": None, "end": None}
-                   for w in workers}
-
-    def make_mouse_cb(worker: CameraWorker):
-        state = draw_states[worker.camera_id]
-
-        def cb(event, x, y, _flags, _param):
-            if event == cv2.EVENT_LBUTTONDOWN:
-                state["drawing"] = True
-                state["start"] = (x, y)
-                state["end"] = (x, y)
-            elif event == cv2.EVENT_MOUSEMOVE and state["drawing"]:
-                state["end"] = (x, y)
-            elif event == cv2.EVENT_LBUTTONUP and state["drawing"]:
-                state["drawing"] = False
-                state["end"] = (x, y)
-                x1, y1 = state["start"]
-                x2, y2 = state["end"]
-                roi = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
-                worker.set_roi(roi)
-                _save_roi(worker.camera_id, roi)
-        return cb
-
     log.info(f"Starting {len(workers)} camera worker(s)…")
     for t in threads:
         t.start()
 
-    # Create named windows and attach mouse callbacks before the display loop
-    for w in workers:
-        win = f"Ha-Meem — {w.camera_name}"
-        cv2.namedWindow(win)
-        cv2.setMouseCallback(win, make_mouse_cb(w))
-    log.info("Tip: click and drag on a camera window to set its Gate ROI. Press 'r' to clear.")
-
-    # Main thread owns all cv2.imshow calls (required on Windows)
+    log.info("Pipeline running — frames shared via in-memory buffer. Press Ctrl+C to stop.")
     try:
-        while any(w.running or t.is_alive() for w, t in zip(workers, threads)):
-            any_alive = False
-            for w in workers:
-                frame = w.get_display_frame()
-                if frame is None:
-                    continue
-                any_alive = True
-
-                # Overlay the in-progress rectangle while the user is dragging
-                state = draw_states[w.camera_id]
-                if state["drawing"] and state["start"] and state["end"]:
-                    cv2.rectangle(frame, state["start"], state["end"], (0, 255, 255), 2)
-
-                cv2.imshow(f"Ha-Meem — {w.camera_name}", frame)
-
-            if not any_alive and not any(t.is_alive() for t in threads):
-                break
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                log.info("Quit signal received")
-                break
-            elif key == ord("r"):
-                # Clear ROI for all cameras
-                for w in workers:
-                    w.set_roi(None)
-                    _save_roi(w.camera_id, [])
-                log.info("All ROIs cleared")
+        # Keep main thread alive while worker threads run; 1s timeout lets
+        # KeyboardInterrupt be delivered promptly even inside join().
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(timeout=1.0)
+    except KeyboardInterrupt:
+        log.info("Interrupt received — shutting down…")
     finally:
         for w in workers:
             w.stop()
         for t in threads:
             t.join(timeout=5)
-        cv2.destroyAllWindows()
         log.info("Pipeline shut down cleanly")
 
 

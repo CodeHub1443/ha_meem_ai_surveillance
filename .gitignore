@@ -107,3 +107,5 @@ whatsapp_session/
 
 # TensorRT cache
 trt_cache/
+stream_frames/
+.claude/
