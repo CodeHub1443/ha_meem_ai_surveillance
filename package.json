@@ -1,0 +1,14 @@
+{
+  "name": "ha-meem-surveillance-system",
+  "version": "1.0.0",
+  "description": "Unified runner for Ha-Meem AI Surveillance Backend and Frontend",
+  "scripts": {
+    "install-all": "npm install && cd frontend && npm install",
+    "start": "concurrently -n \"BACKEND,FRONTEND\" -c \"cyan,green\" \"python run.py\" \"cd frontend && npm run dev\"",
+    "backend": "python run.py",
+    "frontend": "cd frontend && npm run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
