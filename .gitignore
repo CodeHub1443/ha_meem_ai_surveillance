@@ -109,3 +109,4 @@ whatsapp_session/
 trt_cache/
 stream_frames/
 .claude/
+cloudflared-windows-amd64.exe

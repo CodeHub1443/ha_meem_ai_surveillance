@@ -27,7 +27,17 @@
       "PowerShell(head -200)",
       "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Force | Select-Object Name, @{Name=\"Type\";Expression={if\\($_.PSIsContainer\\){\"DIR\"}else{\"FILE\"}}} | Format-Table -AutoSize)",
       "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\apps\" -Directory | ForEach-Object { \"{0}\" -f $_.Name })",
-      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\core\" -Directory | ForEach-Object { \"{0}\" -f $_.Name })"
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\core\" -Directory | ForEach-Object { \"{0}\" -f $_.Name })",
+      "Bash(Get-ChildItem \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\data\\\\aligned_faces\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(Format-Table)",
+      "PowerShell(\\(Get-ChildItem \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\dataset\" -Force\\).Count; \\(Get-ChildItem \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\dataset\" -Force\\) | Select-Object -First 5 Name)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "Bash(cloudflared --version)",
+      "Bash(npx wrangler *)",
+      "Bash(git restore *)"
     ]
   }
 }
