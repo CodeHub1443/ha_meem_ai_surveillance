@@ -210,6 +210,85 @@ class EventStore:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_cluster_groups(self, max_snapshots: int = 4) -> dict:
+        """Return clusters and singletons with sample snapshots for visual verification.
+
+        Returns:
+          {
+            "clusters":   [ {cluster_id, track_count, first_seen, last_seen,
+                             cameras, snapshots}, ... ],   # label >= 0, sorted by size desc
+            "singletons": [ {track_id, first_seen, camera_id, snapshot}, ... ],
+          }
+        """
+        conn = self._conn()
+
+        # ── Named clusters (cluster_id >= 0) ──────────────────────────────────
+        cluster_rows = conn.execute("""
+            SELECT cluster_id,
+                   COUNT(DISTINCT track_id) AS track_count,
+                   MIN(timestamp)           AS first_seen,
+                   MAX(timestamp)           AS last_seen,
+                   GROUP_CONCAT(DISTINCT camera_id) AS cameras
+            FROM   unknown_embeddings
+            WHERE  cluster_id >= 0
+            GROUP  BY cluster_id
+            ORDER  BY track_count DESC, cluster_id
+        """).fetchall()
+
+        # Up to max_snapshots non-null snapshots per cluster (most recent first)
+        snap_rows = conn.execute("""
+            WITH ranked AS (
+                SELECT cluster_id, snapshot,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cluster_id
+                           ORDER BY timestamp DESC
+                       ) AS rn
+                FROM unknown_embeddings
+                WHERE cluster_id >= 0 AND snapshot IS NOT NULL
+            )
+            SELECT cluster_id, snapshot FROM ranked WHERE rn <= ?
+        """, (max_snapshots,)).fetchall()
+
+        snap_map: Dict[int, List[str]] = {}
+        for r in snap_rows:
+            snap_map.setdefault(r["cluster_id"], []).append(r["snapshot"])
+
+        clusters = [
+            {
+                "cluster_id":  r["cluster_id"],
+                "track_count": r["track_count"],
+                "first_seen":  r["first_seen"],
+                "last_seen":   r["last_seen"],
+                "cameras":     r["cameras"].split(",") if r["cameras"] else [],
+                "snapshots":   snap_map.get(r["cluster_id"], []),
+            }
+            for r in cluster_rows
+        ]
+
+        # ── Singletons (cluster_id == -1, one entry per track_id) ─────────────
+        singleton_rows = conn.execute("""
+            SELECT track_id,
+                   MIN(timestamp) AS first_seen,
+                   camera_id,
+                   MAX(snapshot)  AS snapshot
+            FROM   unknown_embeddings
+            WHERE  cluster_id = -1
+            GROUP  BY track_id
+            ORDER  BY first_seen DESC
+        """).fetchall()
+
+        singletons = [
+            {
+                "track_id":  r["track_id"],
+                "first_seen": r["first_seen"],
+                "camera_id": r["camera_id"],
+                "snapshot":  r["snapshot"],
+            }
+            for r in singleton_rows
+        ]
+
+        return {"clusters": clusters, "singletons": singletons}
+
     def count_unique_unauthorized(
         self,
         camera_id: Optional[str] = None,

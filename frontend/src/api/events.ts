@@ -81,7 +81,39 @@ export async function fetchStatsSummary(query: {
   return res.json();
 }
 
-export async function triggerClustering(minClusterSize = 2): Promise<{
+export interface ClusterGroup {
+  cluster_id: number;
+  track_count: number;
+  first_seen: string;
+  last_seen: string;
+  cameras: string[];
+  snapshots: string[];
+}
+
+export interface ClusterSingleton {
+  track_id: number;
+  first_seen: string;
+  camera_id: string;
+  snapshot: string | null;
+}
+
+export interface ClusterGroups {
+  clusters: ClusterGroup[];
+  singletons: ClusterSingleton[];
+}
+
+export async function fetchClusterGroups(maxSnapshots = 4): Promise<ClusterGroups> {
+  const res = await fetch(
+    `${API_BASE_URL}/cluster/unknowns/groups?max_snapshots=${maxSnapshots}`,
+  );
+  if (!res.ok) throw new Error("Failed to fetch cluster groups");
+  return res.json();
+}
+
+export async function triggerClustering(
+  minClusterSize = 2,
+  distanceThreshold = 0.45,
+): Promise<{
   status: string;
   n_embeddings: number;
   n_tracks: number;
@@ -90,7 +122,7 @@ export async function triggerClustering(minClusterSize = 2): Promise<{
   unique_unauthorized: number;
 }> {
   const res = await fetch(
-    `${API_BASE_URL}/cluster/unknowns?min_cluster_size=${minClusterSize}`,
+    `${API_BASE_URL}/cluster/unknowns?min_cluster_size=${minClusterSize}&distance_threshold=${distanceThreshold}`,
     { method: "POST" },
   );
   if (!res.ok) {

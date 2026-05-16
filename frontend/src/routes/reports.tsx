@@ -11,7 +11,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EventBadge } from "@/components/shared/EventBadge";
-import { fetchEvents, fetchEventsCount, fetchStatsSummary, triggerClustering, snapshotUrl } from "@/api/events";
+import { fetchEvents, fetchEventsCount, fetchStatsSummary, triggerClustering, fetchClusterGroups, snapshotUrl } from "@/api/events";
+import type { ClusterGroup, ClusterSingleton } from "@/api/events";
 import { fetchPersons } from "@/api/stubs";
 import { API_BASE_URL } from "@/api/config";
 import { FileText, Users, Download, Printer, ShieldCheck, ScanFace } from "lucide-react";
@@ -57,6 +58,7 @@ function EventReportTab() {
   const [typeFilter, setTypeFilter] = useState<"" | EventType>("");
   const [page, setPage] = useState(1);
   const [clustering, setClustering] = useState(false);
+  const [distanceThreshold, setDistanceThreshold] = useState(0.45);
 
   const [applied, setApplied] = useState({
     since: today,
@@ -115,7 +117,7 @@ function EventReportTab() {
   const handleAnalyze = async () => {
     setClustering(true);
     try {
-      await triggerClustering();
+      await triggerClustering(2, distanceThreshold);
       statsQ.refetch();
     } finally {
       setClustering(false);
@@ -211,10 +213,17 @@ function EventReportTab() {
           lastClusteredAt={stats?.last_clustered_at ?? null}
           totalEmbeddings={stats?.total_unknown_embeddings ?? 0}
           clustering={clustering}
+          distanceThreshold={distanceThreshold}
+          onDistanceChange={setDistanceThreshold}
           onAnalyze={handleAnalyze}
           t={t}
         />
       </div>
+
+      {/* Cluster browser — only shown after at least one clustering run */}
+      {stats?.last_clustered_at && (
+        <ClusterBrowser lastClusteredAt={stats.last_clustered_at} />
+      )}
 
       {/* Events table */}
       <Card className="overflow-hidden">
@@ -366,6 +375,132 @@ function EnrolledPersonsTab() {
 }
 
 /* ══════════════════════════════════════════════
+   Cluster Browser
+══════════════════════════════════════════════ */
+function ClusterBrowser({ lastClusteredAt }: { lastClusteredAt: string }) {
+  const { t } = useTranslation();
+
+  const clusterQ = useQuery({
+    queryKey: ["cluster-groups", lastClusteredAt],
+    queryFn: () => fetchClusterGroups(4),
+  });
+
+  const data = clusterQ.data;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-base font-semibold">{t("reports.clusterBrowser")}</h2>
+        <p className="text-xs text-muted-foreground mt-0.5">{t("reports.clusterBrowserDesc")}</p>
+      </div>
+
+      {clusterQ.isLoading ? (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="h-52 bg-card rounded-lg animate-pulse border" />
+          ))}
+        </div>
+      ) : !data || (data.clusters.length === 0 && data.singletons.length === 0) ? (
+        <Card className="p-8 text-center text-sm text-muted-foreground">
+          {t("reports.noClusters")}
+        </Card>
+      ) : (
+        <>
+          {data.clusters.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {data.clusters.map((cluster) => (
+                <ClusterCard key={cluster.cluster_id} cluster={cluster} />
+              ))}
+            </div>
+          )}
+
+          {data.singletons.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium text-muted-foreground">{t("reports.singletons")}</h3>
+              <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-10 gap-3">
+                {data.singletons.map((s) => (
+                  <SingletonCard key={s.track_id} singleton={s} />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ClusterCard({ cluster }: { cluster: ClusterGroup }) {
+  const { t } = useTranslation();
+  const placeholders = Math.max(0, 2 - cluster.snapshots.length);
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-sm truncate">
+          {t("reports.clusterN", { n: cluster.cluster_id })}
+        </span>
+        <Badge variant="secondary" className="shrink-0 text-xs">
+          {cluster.track_count} {t("reports.tracks")}
+        </Badge>
+      </div>
+
+      <div className="grid grid-cols-2 gap-1.5">
+        {cluster.snapshots.map((snap, i) => (
+          <img
+            key={i}
+            src={snapshotUrl(snap)!}
+            className="w-full aspect-square rounded object-cover border bg-muted"
+            alt={`cluster-${cluster.cluster_id}-${i}`}
+          />
+        ))}
+        {Array.from({ length: placeholders }).map((_, i) => (
+          <div key={`ph-${i}`} className="w-full aspect-square rounded bg-muted/40 border flex items-center justify-center">
+            <ScanFace className="h-6 w-6 text-muted-foreground/25" />
+          </div>
+        ))}
+      </div>
+
+      <div className="text-xs text-muted-foreground space-y-1.5">
+        <div className="flex flex-wrap gap-1">
+          {cluster.cameras.map((cam) => (
+            <Badge key={cam} variant="outline" className="text-xs px-1.5 py-0">{cam}</Badge>
+          ))}
+        </div>
+        <div className="font-mono">
+          {format(new Date(cluster.first_seen), "MMM d HH:mm")}
+          {" – "}
+          {format(new Date(cluster.last_seen), "MMM d HH:mm")}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function SingletonCard({ singleton }: { singleton: ClusterSingleton }) {
+  const { t } = useTranslation();
+  const snapSrc = snapshotUrl(singleton.snapshot);
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      {snapSrc ? (
+        <img
+          src={snapSrc}
+          className="w-full aspect-square rounded object-cover border bg-muted"
+          alt="singleton"
+        />
+      ) : (
+        <div className="w-full aspect-square rounded bg-muted/40 border flex items-center justify-center">
+          <ScanFace className="h-5 w-5 text-muted-foreground/25" />
+        </div>
+      )}
+      <span className="text-xs text-muted-foreground/70 text-center leading-tight">{singleton.camera_id}</span>
+      <span className="text-xs text-muted-foreground/50 text-center leading-tight">{t("reports.singleton")}</span>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════
    Shared helpers
 ══════════════════════════════════════════════ */
 function StatCard({ label, value, color }: { label: string; value: number | string; color?: "success" | "danger" }) {
@@ -384,6 +519,8 @@ function UniqueUnauthorizedCard({
   lastClusteredAt,
   totalEmbeddings,
   clustering,
+  distanceThreshold,
+  onDistanceChange,
   onAnalyze,
   t,
 }: {
@@ -391,12 +528,19 @@ function UniqueUnauthorizedCard({
   lastClusteredAt: string | null;
   totalEmbeddings: number;
   clustering: boolean;
+  distanceThreshold: number;
+  onDistanceChange: (v: number) => void;
   onAnalyze: () => void;
   t: (key: string) => string;
 }) {
   const lastRunLabel = lastClusteredAt
     ? `${t("reports.lastAnalyzed")}: ${format(new Date(lastClusteredAt), "MMM d, HH:mm")}`
     : t("reports.neverAnalyzed");
+
+  // cosine distance → similarity label
+  const strictness =
+    distanceThreshold <= 0.35 ? "Strict" :
+    distanceThreshold <= 0.5  ? "Balanced" : "Loose";
 
   return (
     <Card className="p-4 flex flex-col justify-between gap-2">
@@ -412,10 +556,34 @@ function UniqueUnauthorizedCard({
           </div>
         )}
       </div>
+
+      {/* Threshold slider */}
+      <div className="space-y-1">
+        <div className="flex justify-between items-center">
+          <span className="text-xs text-muted-foreground">Similarity</span>
+          <span className="text-xs font-medium">{strictness} ({distanceThreshold.toFixed(2)})</span>
+        </div>
+        <input
+          type="range"
+          min={0.2}
+          max={0.7}
+          step={0.05}
+          value={distanceThreshold}
+          onChange={(e) => onDistanceChange(parseFloat(e.target.value))}
+          disabled={clustering}
+          className="w-full h-1.5 accent-primary cursor-pointer disabled:opacity-50"
+          title={`Cosine distance threshold: ${distanceThreshold.toFixed(2)} (lower = stricter)`}
+        />
+        <div className="flex justify-between text-xs text-muted-foreground/50">
+          <span>Strict</span>
+          <span>Loose</span>
+        </div>
+      </div>
+
       <Button
         size="sm"
         variant="outline"
-        className="w-full mt-1"
+        className="w-full"
         onClick={onAnalyze}
         disabled={clustering || totalEmbeddings === 0}
         title={t("reports.analyzeHint")}

@@ -283,17 +283,36 @@ def get_stats_summary(
     }
 
 
+@app.get("/cluster/unknowns/groups")
+def get_cluster_groups(max_snapshots: int = Query(default=4, ge=1, le=10)):
+    """Return each cluster and singleton with sample snapshots for visual verification."""
+    return _event_store.get_cluster_groups(max_snapshots=max_snapshots)
+
+
 @app.post("/cluster/unknowns")
 def trigger_clustering(
     min_cluster_size: int = Query(default=2, ge=2, le=50),
+    distance_threshold: float = Query(
+        default=0.45,
+        ge=0.1,
+        le=1.0,
+        description=(
+            "Cosine distance ceiling for merging two tracks into the same cluster "
+            "(1 − cosine_similarity). Lower = stricter. "
+            "0.3 = similarity>0.7, 0.45 = similarity>0.55, 0.6 = similarity>0.4."
+        ),
+    ),
 ):
-    """Run offline HDBSCAN clustering on stored unknown face embeddings.
+    """Run agglomerative clustering on stored unknown face embeddings.
 
     This is a blocking call — it returns once clustering is complete.
     Typical runtime: <5 s for tens of thousands of embeddings.
     """
     try:
-        result = run_clustering(min_cluster_size=min_cluster_size)
+        result = run_clustering(
+            min_cluster_size=min_cluster_size,
+            distance_threshold=distance_threshold,
+        )
         return {"status": "ok", **result}
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
