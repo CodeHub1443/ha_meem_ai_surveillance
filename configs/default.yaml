@@ -14,3 +14,8 @@ models:
 tracking:
   iou_threshold: 0.3           # Stage-1 match threshold; stage-2 uses half this value
   max_age: 10                  # Frames a track survives without a match (OC-SORT recovers longer)
+
+recognition:
+  unknown_hold_seconds: 3.0    # Seconds to hold an UNKNOWN decision before emitting.
+                               # If the track upgrades to AUTHORIZED within this window,
+                               # the UNKNOWN event is silently discarded.

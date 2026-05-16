@@ -14,6 +14,7 @@ import numpy as np
 import yaml
 
 from core import frame_buffer as _fb
+from core.clustering import run_clustering
 from core.database.event_store import EventStore
 
 # ── Gallery cache ──────────────────────────────────────────────────────────────
@@ -265,16 +266,37 @@ def get_stats_summary(
     since: Optional[str] = Query(default=None, description="ISO timestamp lower bound"),
     until: Optional[str] = Query(default=None, description="ISO timestamp upper bound"),
 ):
-    """Authorized vs unknown counts and unique known persons for a given period."""
+    """Authorized vs unknown counts, unique known persons, and unique unauthorized persons."""
     authorized = _event_store.count(camera_id=camera_id, event_type="AUTHORIZED", since=since, until=until)
     unknown = _event_store.count(camera_id=camera_id, event_type="UNKNOWN", since=since, until=until)
     unique_persons = _event_store.count_unique_identities(camera_id=camera_id, since=since, until=until)
+    unique_unauthorized = _event_store.count_unique_unauthorized(camera_id=camera_id, since=since, until=until)
+    meta = _event_store.get_cluster_meta()
     return {
         "authorized": authorized,
         "unknown": unknown,
         "total": authorized + unknown,
         "unique_persons": unique_persons,
+        "unique_unauthorized": unique_unauthorized,
+        "last_clustered_at": meta["last_run_at"] if meta else None,
+        "total_unknown_embeddings": _event_store.count_unknown_embeddings(),
     }
+
+
+@app.post("/cluster/unknowns")
+def trigger_clustering(
+    min_cluster_size: int = Query(default=2, ge=2, le=50),
+):
+    """Run offline HDBSCAN clustering on stored unknown face embeddings.
+
+    This is a blocking call — it returns once clustering is complete.
+    Typical runtime: <5 s for tens of thousands of embeddings.
+    """
+    try:
+        result = run_clustering(min_cluster_size=min_cluster_size)
+        return {"status": "ok", **result}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/events/stream")

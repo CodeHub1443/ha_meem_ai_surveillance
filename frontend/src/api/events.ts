@@ -16,6 +16,9 @@ export interface StatsSummary {
   unknown: number;
   total: number;
   unique_persons: number;
+  unique_unauthorized: number | null;
+  last_clustered_at: string | null;
+  total_unknown_embeddings: number;
 }
 
 function buildQuery(q: EventsQuery): string {
@@ -75,6 +78,25 @@ export async function fetchStatsSummary(query: {
   const qs = p.toString() ? `?${p}` : "";
   const res = await fetch(`${API_BASE_URL}/stats/summary${qs}`);
   if (!res.ok) throw new Error("Failed to fetch stats summary");
+  return res.json();
+}
+
+export async function triggerClustering(minClusterSize = 2): Promise<{
+  status: string;
+  n_embeddings: number;
+  n_tracks: number;
+  n_clusters: number;
+  n_noise: number;
+  unique_unauthorized: number;
+}> {
+  const res = await fetch(
+    `${API_BASE_URL}/cluster/unknowns?min_cluster_size=${minClusterSize}`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail?.detail ?? "Clustering failed");
+  }
   return res.json();
 }
 

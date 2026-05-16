@@ -135,6 +135,9 @@ class CameraWorker:
         self.upgrade_margin: float = rec_cfg.get("upgrade_margin", 0.05)
         self.match_margin: float = rec_cfg.get("match_margin", 0.05)
         self.match_top_k: int = rec_cfg.get("match_top_k", 10)
+        # Seconds to wait before emitting an UNKNOWN event, giving the pipeline
+        # time to collect a frontal frame and upgrade to AUTHORIZED first.
+        self.unknown_hold_seconds: float = rec_cfg.get("unknown_hold_seconds", 3.0)
 
         roi = camera_cfg.get("roi")
         self.roi: Optional[tuple] = tuple(roi) if roi and len(roi) == 4 else None
@@ -188,9 +191,28 @@ class CameraWorker:
         # ── 4. Self-expiry: clean aggregator + state ───────────────────
         expired_ids = self.aggregator.expire_stale_tracks()
         for tid in expired_ids:
-            self.state.release_track(tid)
+            held = self.state.release_track(tid)
+            if held is not None:
+                # Person left frame without being recognised → emit now
+                ts = datetime.fromisoformat(held["event_data"]["timestamp"])
+                self.io_worker.submit(
+                    held["frame"], held["event_data"], None, ts, held["embedding"]
+                )
+                log.info(
+                    f"[{self.camera_id}] EMIT DEFERRED UNKNOWN track={tid} (track expired)"
+                )
             self._logged_size_reject.discard(tid)
             self._logged_blur_reject.discard(tid)
+
+        # Flush held unknowns whose hold period elapsed (person still in frame)
+        for tid, held in self.state.pop_overdue_unknowns(self.unknown_hold_seconds):
+            ts = datetime.fromisoformat(held["event_data"]["timestamp"])
+            self.io_worker.submit(
+                held["frame"], held["event_data"], None, ts, held["embedding"]
+            )
+            log.info(
+                f"[{self.camera_id}] EMIT DEFERRED UNKNOWN track={tid} (hold period elapsed)"
+            )
 
         # ── 5. Quality gate + crop all valid faces ─────────────────────
         valid_faces: List[Face] = []
@@ -292,6 +314,8 @@ class CameraWorker:
                     f"UNKNOWN → {identity} score={score:.4f}"
                 )
                 self.state.upgrade_track(face.track_id, identity)
+                # Discard the held UNKNOWN — only the AUTHORIZED event is emitted
+                self.state.discard_held_unknown(face.track_id)
                 emit_identity, emit_event = identity, "AUTHORIZED"
             else:
                 if not self.state.can_alert(identity, face.track_id):
@@ -309,6 +333,8 @@ class CameraWorker:
                 "score": round(float(score), 4),
                 "event": emit_event,
             }
+
+            # Always annotate the live display frame regardless of hold status
             x1, y1, x2, y2 = face.bbox[:4].astype(int)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(
@@ -317,12 +343,22 @@ class CameraWorker:
                 (x1, y1 - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
             )
-            self.io_worker.submit(annotated, event_data, emit_identity, frame_ts)
 
-            log.info(
-                f"[{self.camera_id}] {emit_event}: "
-                f"{emit_identity or 'Unknown'} score={score:.3f}"
-            )
+            if emit_event == "UNKNOWN":
+                # Hold — wait to see if this track upgrades before emitting
+                self.state.hold_unknown(
+                    face.track_id, annotated.copy(), event_data, consensus
+                )
+                log.info(
+                    f"[{self.camera_id}] HOLD UNKNOWN track={face.track_id} "
+                    f"score={score:.3f} (waiting up to {self.unknown_hold_seconds:.0f}s)"
+                )
+            else:
+                self.io_worker.submit(annotated, event_data, emit_identity, frame_ts, None)
+                log.info(
+                    f"[{self.camera_id}] {emit_event}: "
+                    f"{emit_identity or 'Unknown'} score={score:.3f}"
+                )
 
         # ── 9. Visualise all tracked faces ────────────────────────────
         for face in tracked:

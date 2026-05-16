@@ -1,8 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { format, subDays } from "date-fns";
+import { format } from "date-fns";
+import { useToday } from "@/hooks/useToday";
 import { AppShell } from "@/components/layout/AppShell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -10,10 +11,10 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EventBadge } from "@/components/shared/EventBadge";
-import { fetchEvents, fetchEventsCount, fetchStatsSummary, snapshotUrl } from "@/api/events";
+import { fetchEvents, fetchEventsCount, fetchStatsSummary, triggerClustering, snapshotUrl } from "@/api/events";
 import { fetchPersons } from "@/api/stubs";
 import { API_BASE_URL } from "@/api/config";
-import { FileText, Users, Download, Printer, ShieldCheck } from "lucide-react";
+import { FileText, Users, Download, Printer, ShieldCheck, ScanFace } from "lucide-react";
 import type { EventType } from "@/types/surveillance";
 
 export const Route = createFileRoute("/reports")({ component: ReportsPage });
@@ -48,19 +49,29 @@ const PAGE_SIZE = 50;
 
 function EventReportTab() {
   const { t } = useTranslation();
+  const today = useToday();
 
-  const [since, setSince] = useState(format(subDays(new Date(), 7), "yyyy-MM-dd"));
-  const [until, setUntil] = useState(format(new Date(), "yyyy-MM-dd"));
+  const [since, setSince] = useState(today);
+  const [until, setUntil] = useState(today);
   const [camFilter, setCamFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState<"" | EventType>("");
   const [page, setPage] = useState(1);
+  const [clustering, setClustering] = useState(false);
 
   const [applied, setApplied] = useState({
-    since,
-    until,
+    since: today,
+    until: today,
     camFilter,
     typeFilter,
   });
+
+  // Roll forward at midnight
+  useEffect(() => {
+    setSince(today);
+    setUntil(today);
+    setApplied((prev) => ({ ...prev, since: today, until: today }));
+    setPage(1);
+  }, [today]);
 
   const sinceISO = applied.since ? new Date(applied.since).toISOString() : undefined;
   const untilISO = applied.until ? `${applied.until}T23:59:59.999Z` : undefined;
@@ -99,6 +110,16 @@ function EventReportTab() {
   const applyFilters = () => {
     setApplied({ since, until, camFilter, typeFilter });
     setPage(1);
+  };
+
+  const handleAnalyze = async () => {
+    setClustering(true);
+    try {
+      await triggerClustering();
+      statsQ.refetch();
+    } finally {
+      setClustering(false);
+    }
   };
 
   const exportCsv = async () => {
@@ -180,11 +201,19 @@ function EventReportTab() {
       </Card>
 
       {/* Summary stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         <StatCard label={t("reports.totalEvents")} value={statsQ.isLoading ? "…" : stats?.total ?? 0} />
         <StatCard label={t("events.authorized")} value={statsQ.isLoading ? "…" : stats?.authorized ?? 0} color="success" />
         <StatCard label={t("events.unknown")} value={statsQ.isLoading ? "…" : stats?.unknown ?? 0} color="danger" />
         <StatCard label={t("reports.uniquePersons")} value={statsQ.isLoading ? "…" : stats?.unique_persons ?? 0} />
+        <UniqueUnauthorizedCard
+          value={statsQ.isLoading ? null : (stats?.unique_unauthorized ?? null)}
+          lastClusteredAt={stats?.last_clustered_at ?? null}
+          totalEmbeddings={stats?.total_unknown_embeddings ?? 0}
+          clustering={clustering}
+          onAnalyze={handleAnalyze}
+          t={t}
+        />
       </div>
 
       {/* Events table */}
@@ -346,6 +375,54 @@ function StatCard({ label, value, color }: { label: string; value: number | stri
         {value}
       </div>
       <div className="text-xs text-muted-foreground mt-0.5">{label}</div>
+    </Card>
+  );
+}
+
+function UniqueUnauthorizedCard({
+  value,
+  lastClusteredAt,
+  totalEmbeddings,
+  clustering,
+  onAnalyze,
+  t,
+}: {
+  value: number | null;
+  lastClusteredAt: string | null;
+  totalEmbeddings: number;
+  clustering: boolean;
+  onAnalyze: () => void;
+  t: (key: string) => string;
+}) {
+  const lastRunLabel = lastClusteredAt
+    ? `${t("reports.lastAnalyzed")}: ${format(new Date(lastClusteredAt), "MMM d, HH:mm")}`
+    : t("reports.neverAnalyzed");
+
+  return (
+    <Card className="p-4 flex flex-col justify-between gap-2">
+      <div>
+        <div className="text-2xl font-bold tabular-nums text-warning">
+          {value === null ? "—" : value}
+        </div>
+        <div className="text-xs text-muted-foreground mt-0.5">{t("reports.uniqueUnauthorized")}</div>
+        <div className="text-xs text-muted-foreground/70 mt-1">{lastRunLabel}</div>
+        {totalEmbeddings > 0 && (
+          <div className="text-xs text-muted-foreground/60 mt-0.5">
+            {totalEmbeddings} embeddings stored
+          </div>
+        )}
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        className="w-full mt-1"
+        onClick={onAnalyze}
+        disabled={clustering || totalEmbeddings === 0}
+        title={t("reports.analyzeHint")}
+      >
+        <ScanFace className="h-3.5 w-3.5 mr-1.5" />
+        {clustering ? t("reports.analyzing") : t("reports.analyze")}
+      </Button>
     </Card>
   );
 }

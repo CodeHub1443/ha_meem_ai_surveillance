@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { format } from "date-fns";
@@ -17,6 +17,7 @@ import { SnapshotModal } from "@/components/shared/SnapshotModal";
 import { useCameraList } from "@/context/SettingsContext";
 import { fetchEvents, fetchEventsCount } from "@/api/events";
 import { useSSEEvent } from "@/context/SSEContext";
+import { useToday } from "@/hooks/useToday";
 import type { EventType, SurveillanceEvent } from "@/types/surveillance";
 import { Bell, Download } from "lucide-react";
 
@@ -35,23 +36,43 @@ function EventsPage() {
   const { t } = useTranslation();
   const cameras = useCameraList();
   const search = Route.useSearch();
+  const today = useToday();
+
   const [cameraId, setCameraId] = useState<string | undefined>(search.camera);
   const [eventType, setEventType] = useState<EventType | "ALL">("ALL");
   const [identity, setIdentity] = useState("");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+  const [startDate, setStartDate] = useState(today);
+  const [endDate, setEndDate] = useState(today);
   const [page, setPage] = useState(1);
   const [live, setLive] = useState(false);
   const [detail, setDetail] = useState<SurveillanceEvent | null>(null);
   const [snapshot, setSnapshot] = useState<string | null>(null);
 
-  const [appliedFilters, setAppliedFilters] = useState({
-    camera_id: cameraId as string | undefined,
-    event_type: eventType as EventType | "ALL",
+  const [appliedFilters, setAppliedFilters] = useState<{
+    camera_id: string | undefined;
+    event_type: EventType | "ALL";
+    identity: string;
+    since: string | undefined;
+    until: string | undefined;
+  }>({
+    camera_id: cameraId,
+    event_type: eventType,
     identity: "",
-    since: undefined as string | undefined,
-    until: undefined as string | undefined,
+    since: `${today}T00:00:00.000Z`,
+    until: `${today}T23:59:59.999Z`,
   });
+
+  // At midnight, roll both the visible date inputs and the active filter forward
+  useEffect(() => {
+    setStartDate(today);
+    setEndDate(today);
+    setAppliedFilters((prev) => ({
+      ...prev,
+      since: `${today}T00:00:00.000Z`,
+      until: `${today}T23:59:59.999Z`,
+    }));
+    setPage(1);
+  }, [today]);
 
   // When live mode is on, auto-jump to page 1 on each new event.
   // Query invalidation is already handled by the global SSEProvider.
@@ -111,9 +132,15 @@ function EventsPage() {
     setCameraId(undefined);
     setEventType("ALL");
     setIdentity("");
-    setStartDate("");
-    setEndDate("");
-    setAppliedFilters({ camera_id: undefined, event_type: "ALL", identity: "", since: undefined, until: undefined });
+    setStartDate(today);
+    setEndDate(today);
+    setAppliedFilters({
+      camera_id: undefined,
+      event_type: "ALL",
+      identity: "",
+      since: `${today}T00:00:00.000Z`,
+      until: `${today}T23:59:59.999Z`,
+    });
     setPage(1);
   };
 

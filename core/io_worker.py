@@ -36,13 +36,15 @@ class AsyncIOWorker:
         event_data: dict,
         identity: Optional[str],
         timestamp: datetime,
+        embedding: Optional[np.ndarray] = None,
     ):
         """Non-blocking enqueue. Drops silently when the queue is full."""
         if frame is None:
             log.warning("AsyncIOWorker.submit called with None frame — skipped")
             return
+        emb_copy = embedding.copy() if embedding is not None else None
         try:
-            self._queue.put_nowait((frame.copy(), event_data.copy(), identity, timestamp))
+            self._queue.put_nowait((frame.copy(), event_data.copy(), identity, timestamp, emb_copy))
         except queue.Full:
             log.warning("AsyncIOWorker queue full — event dropped")
 
@@ -51,7 +53,7 @@ class AsyncIOWorker:
             item = self._queue.get()
             if item is None:
                 break
-            frame, event_data, identity, timestamp = item
+            frame, event_data, identity, timestamp, embedding = item
             try:
                 snapshot_path = self._snapshot_writer.save(
                     frame, identity, timestamp=timestamp
@@ -62,6 +64,14 @@ class AsyncIOWorker:
                 if self._event_store is not None:
                     try:
                         self._event_store.insert(event_data)
+                        if embedding is not None and event_data.get("event") == "UNKNOWN":
+                            self._event_store.insert_unknown_embedding(
+                                track_id=event_data["track_id"],
+                                camera_id=event_data["camera_id"],
+                                timestamp=event_data["timestamp"],
+                                embedding=embedding,
+                                snapshot=snapshot_path,
+                            )
                     except Exception as db_exc:
                         log.error("EventStore insert failed: %s", db_exc)
             except Exception as e:

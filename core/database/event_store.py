@@ -1,7 +1,10 @@
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 DB_PATH = "logs/events.db"
 
@@ -47,6 +50,27 @@ class EventStore:
             CREATE INDEX IF NOT EXISTS idx_events_camera   ON events(camera_id);
             CREATE INDEX IF NOT EXISTS idx_events_identity ON events(identity);
             CREATE INDEX IF NOT EXISTS idx_events_ts       ON events(timestamp);
+
+            CREATE TABLE IF NOT EXISTS unknown_embeddings (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id   INTEGER NOT NULL,
+                camera_id  TEXT NOT NULL,
+                timestamp  TEXT NOT NULL,
+                snapshot   TEXT,
+                embedding  BLOB NOT NULL,
+                cluster_id INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_uemb_ts  ON unknown_embeddings(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_uemb_cam ON unknown_embeddings(camera_id);
+            CREATE INDEX IF NOT EXISTS idx_uemb_cid ON unknown_embeddings(cluster_id);
+
+            CREATE TABLE IF NOT EXISTS cluster_meta (
+                id           INTEGER PRIMARY KEY CHECK (id = 1),
+                last_run_at  TEXT NOT NULL,
+                n_embeddings INTEGER NOT NULL,
+                n_clusters   INTEGER NOT NULL,
+                n_noise      INTEGER NOT NULL
+            );
         """)
         conn.commit()
 
@@ -123,6 +147,107 @@ class EventStore:
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT COUNT(DISTINCT identity) FROM events {where}"
         return self._conn().execute(sql, params).fetchone()[0]
+
+    # ── Unknown embeddings ─────────────────────────────────────────────────────
+
+    def insert_unknown_embedding(
+        self,
+        track_id: int,
+        camera_id: str,
+        timestamp: str,
+        embedding: np.ndarray,
+        snapshot: Optional[str] = None,
+    ) -> int:
+        """Persist the aggregated face embedding for an UNKNOWN event."""
+        blob = embedding.astype(np.float32).tobytes()
+        conn = self._conn()
+        cur = conn.execute(
+            """INSERT INTO unknown_embeddings
+               (track_id, camera_id, timestamp, snapshot, embedding)
+               VALUES (?, ?, ?, ?, ?)""",
+            (track_id, camera_id, timestamp, snapshot, blob),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def get_all_unknown_embeddings(self) -> List[Dict]:
+        """Return id, track_id, camera_id, timestamp, embedding blob for all rows."""
+        rows = self._conn().execute(
+            "SELECT id, track_id, camera_id, timestamp, embedding FROM unknown_embeddings"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_unknown_embeddings(self) -> int:
+        return self._conn().execute("SELECT COUNT(*) FROM unknown_embeddings").fetchone()[0]
+
+    # ── Cluster results ────────────────────────────────────────────────────────
+
+    def update_cluster_results(
+        self,
+        updates: List[Tuple[int, int]],   # [(db_id, cluster_id), ...]
+        n_embeddings: int,
+        n_clusters: int,
+        n_noise: int,
+    ):
+        """Write cluster labels back to unknown_embeddings and record run metadata."""
+        conn = self._conn()
+        conn.executemany(
+            "UPDATE unknown_embeddings SET cluster_id = ? WHERE id = ?",
+            [(label, db_id) for db_id, label in updates],
+        )
+        conn.execute(
+            """INSERT OR REPLACE INTO cluster_meta
+               (id, last_run_at, n_embeddings, n_clusters, n_noise)
+               VALUES (1, ?, ?, ?, ?)""",
+            (datetime.now(timezone.utc).isoformat(), n_embeddings, n_clusters, n_noise),
+        )
+        conn.commit()
+
+    def get_cluster_meta(self) -> Optional[Dict]:
+        """Return metadata from the most recent clustering run, or None."""
+        row = self._conn().execute(
+            "SELECT last_run_at, n_embeddings, n_clusters, n_noise FROM cluster_meta WHERE id = 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def count_unique_unauthorized(
+        self,
+        camera_id: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+    ) -> Optional[int]:
+        """Count unique unauthorized persons from the last clustering run.
+
+        A unique person = one HDBSCAN cluster (≥2 track appearances) OR one
+        singleton track (noise, label=-1, appeared exactly once).
+        Returns None if clustering has never been run.
+        """
+        if self.get_cluster_meta() is None:
+            return None
+
+        clauses: List[str] = ["cluster_id IS NOT NULL"]
+        params: List = []
+        if camera_id:
+            clauses.append("camera_id = ?")
+            params.append(camera_id)
+        if since:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        where = "WHERE " + " AND ".join(clauses)
+
+        conn = self._conn()
+        n_clusters = conn.execute(
+            f"SELECT COUNT(DISTINCT cluster_id) FROM unknown_embeddings {where} AND cluster_id >= 0",
+            params,
+        ).fetchone()[0]
+        n_singletons = conn.execute(
+            f"SELECT COUNT(DISTINCT track_id) FROM unknown_embeddings {where} AND cluster_id = -1",
+            params,
+        ).fetchone()[0]
+        return n_clusters + n_singletons
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
