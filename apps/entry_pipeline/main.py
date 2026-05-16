@@ -30,7 +30,7 @@ from core.io_worker import AsyncIOWorker
 from core.pipeline_state import PipelineState
 from core.quality import calculate_blur_score, AdaptiveBlurThreshold
 from core.recognition import AdaFaceRecognizer
-from core.tracking import SORTTracker
+from core.tracking import OCSORTTracker
 from core.utils.config import load_config
 from core.utils.image import align_face, pose_weight
 
@@ -107,9 +107,9 @@ class CameraWorker:
         fusion_cfg = config.get("fusion", {})
         track_cfg = config.get("tracking", {})
 
-        self.tracker = SORTTracker(
+        self.tracker = OCSORTTracker(
             iou_threshold=track_cfg.get("iou_threshold", 0.3),
-            max_age=track_cfg.get("max_age", 5),
+            max_age=track_cfg.get("max_age", 10),
         )
         self.aggregator = EmbeddingAggregator(
             buffer_size=fusion_cfg.get("buffer_size", 10),

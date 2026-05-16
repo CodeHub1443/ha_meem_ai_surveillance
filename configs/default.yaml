@@ -10,3 +10,7 @@ models:
   scrfd_onnx: models/exported/scrfd_10g_bnkps.onnx
   adaface_onnx: models/exported/adaface.onnx
   ort_intra_threads: 2         # ORT CPU threads per inference call; prevents competition with camera threads
+
+tracking:
+  iou_threshold: 0.3           # Stage-1 match threshold; stage-2 uses half this value
+  max_age: 10                  # Frames a track survives without a match (OC-SORT recovers longer)
