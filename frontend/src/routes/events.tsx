@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect, useRef } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { format } from "date-fns";
 import { AppShell } from "@/components/layout/AppShell";
@@ -15,8 +15,8 @@ import { EventBadge } from "@/components/shared/EventBadge";
 import { ScoreBar } from "@/components/shared/ScoreBar";
 import { SnapshotModal } from "@/components/shared/SnapshotModal";
 import { useCameraList } from "@/context/SettingsContext";
-import { fetchEvents, fetchEventsCount, SSE_EVENTS_URL } from "@/api/events";
-import { useSSEStream } from "@/hooks/useSSEStream";
+import { fetchEvents, fetchEventsCount } from "@/api/events";
+import { useSSEEvent } from "@/context/SSEContext";
 import type { EventType, SurveillanceEvent } from "@/types/surveillance";
 import { Bell, Download } from "lucide-react";
 
@@ -35,8 +35,6 @@ function EventsPage() {
   const { t } = useTranslation();
   const cameras = useCameraList();
   const search = Route.useSearch();
-  const queryClient = useQueryClient();
-
   const [cameraId, setCameraId] = useState<string | undefined>(search.camera);
   const [eventType, setEventType] = useState<EventType | "ALL">("ALL");
   const [identity, setIdentity] = useState("");
@@ -55,17 +53,13 @@ function EventsPage() {
     until: undefined as string | undefined,
   });
 
-  // SSE: when live mode is on, refetch after each new event instead of accumulating in state
-  const sse = useSSEStream(SSE_EVENTS_URL, live);
-  const prevSseLen = useRef(0);
-  useEffect(() => {
-    if (!live) return;
-    if (sse.events.length > prevSseLen.current) {
-      prevSseLen.current = sse.events.length;
-      queryClient.invalidateQueries({ queryKey: ["events", "list"] });
-      queryClient.invalidateQueries({ queryKey: ["events", "count"] });
-    }
-  }, [sse.events.length, live, queryClient]);
+  // When live mode is on, auto-jump to page 1 on each new event.
+  // Query invalidation is already handled by the global SSEProvider.
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  useSSEEvent(() => {
+    if (liveRef.current) setPage(1);
+  });
 
   const queryKey = ["events", "list", appliedFilters, page];
   const countKey = ["events", "count", appliedFilters];
@@ -191,9 +185,7 @@ function EventsPage() {
             <span className="text-xs text-muted-foreground">{t("events.liveMode")}</span>
             <Switch checked={live} onCheckedChange={setLive} />
             {live && (
-              <span className="text-[10px] text-muted-foreground">
-                {sse.status === "connected" ? "● live" : "○"}
-              </span>
+              <span className="text-[10px] text-success">● live</span>
             )}
           </div>
         </div>

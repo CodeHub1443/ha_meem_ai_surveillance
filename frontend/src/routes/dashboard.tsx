@@ -1,19 +1,17 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { format } from "date-fns";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
-import { toast } from "sonner";
 import { AppShell } from "@/components/layout/AppShell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EventBadge } from "@/components/shared/EventBadge";
 import { CameraStatusDot } from "@/components/shared/CameraStatusDot";
-import { fetchLatestEvents, fetchStatsSummary, SSE_EVENTS_URL } from "@/api/events";
+import { fetchLatestEvents, fetchStatsSummary } from "@/api/events";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
-import { useSSEStream } from "@/hooks/useSSEStream";
 import { useCameraList } from "@/context/SettingsContext";
 import { Activity, AlertTriangle, Camera as CameraIcon, ShieldCheck, Bell } from "lucide-react";
 
@@ -44,18 +42,6 @@ function DashboardPage() {
     refetchInterval: 15000,
     retry: false,
   });
-
-  const sse = useSSEStream(SSE_EVENTS_URL, true);
-
-  useEffect(() => {
-    const ev = sse.events[0];
-    if (!ev || ev.event !== "UNKNOWN") return;
-    toast.error(t("dashboard.alertTitle"), {
-      description: `${t("events.camera")}: ${ev.camera_id} — ${format(new Date(ev.timestamp), "HH:mm:ss")}`,
-      action: { label: t("common.view"), onClick: () => navigate({ to: "/events" }) },
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sse.events.length]);
 
   const totalToday = todayStats.data?.total ?? 0;
   const unauthorizedToday = todayStats.data?.unknown ?? 0;

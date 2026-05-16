@@ -40,7 +40,11 @@
       "Bash(git restore *)",
       "PowerShell($logFile = \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\logs\\\\events.jsonl\"; \\(Get-Item $logFile\\).Length / 1MB)",
       "Bash(python tools/migrate_events.py)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "PowerShell(head -50)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -MaxDepth 2 -Directory | Select-Object -ExpandProperty FullName | Where-Object {$_ -notmatch 'node_modules|__pycache__|\\\\.claude'})",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Directory -Depth 2 | Where-Object {$_.FullName -notmatch 'node_modules|__pycache__|\\\\.claude|whatsapp_session'} | Select-Object -ExpandProperty FullName | Sort-Object)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Recurse -Filter \"*.py\")"
     ]
   }
 }

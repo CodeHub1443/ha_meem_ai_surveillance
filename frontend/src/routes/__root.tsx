@@ -10,6 +10,7 @@ import {
 
 import appCss from "../styles.css?url";
 import { SettingsProvider } from "@/context/SettingsContext";
+import { SSEProvider } from "@/context/SSEContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/i18n";
 
@@ -102,8 +103,10 @@ function RootComponent() {
   return (
     <QueryClientProvider client={queryClient}>
       <SettingsProvider>
-        <Outlet />
-        <Toaster position="top-right" richColors closeButton />
+        <SSEProvider>
+          <Outlet />
+          <Toaster position="top-right" richColors closeButton />
+        </SSEProvider>
       </SettingsProvider>
     </QueryClientProvider>
   );
