@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 import yaml
 
-from core.database import FaceDatabase
+from core.database import FaceDatabase, EventStore
 from core.detection import SCRFDDetector, Face
 from core.events import EventEmitter, SnapshotWriter
 from core.fusion import EmbeddingAggregator
@@ -149,7 +149,8 @@ class CameraWorker:
             base_dir="snapshots",
             camera_id=self.camera_id,
         )
-        self.io_worker = AsyncIOWorker(event_emitter, snapshot_writer)
+        event_store = EventStore()
+        self.io_worker = AsyncIOWorker(event_emitter, snapshot_writer, event_store=event_store)
 
         # Tracks that were logged as quality-rejected once (avoid per-frame spam)
         self._logged_size_reject: set = set()

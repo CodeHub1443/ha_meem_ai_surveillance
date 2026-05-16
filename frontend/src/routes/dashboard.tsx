@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EventBadge } from "@/components/shared/EventBadge";
 import { CameraStatusDot } from "@/components/shared/CameraStatusDot";
-import { fetchEvents, fetchLatestEvents, SSE_EVENTS_URL } from "@/api/events";
+import { fetchLatestEvents, fetchStatsSummary, SSE_EVENTS_URL } from "@/api/events";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
 import { useSSEStream } from "@/hooks/useSSEStream";
 import { useCameraList } from "@/context/SettingsContext";
@@ -31,9 +31,10 @@ function DashboardPage() {
     return d.toISOString();
   }, []);
 
-  const todayEvents = useQuery({
-    queryKey: ["events", "today", todayISO],
-    queryFn: () => fetchEvents({ since: todayISO, limit: 1000 }),
+  const todayStats = useQuery({
+    queryKey: ["stats", "today", todayISO],
+    queryFn: () => fetchStatsSummary({ since: todayISO }),
+    refetchInterval: 30000,
     retry: false,
   });
 
@@ -56,10 +57,9 @@ function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sse.events.length]);
 
-  const events = todayEvents.data || [];
-  const totalToday = events.length;
-  const unauthorizedToday = events.filter((e) => e.event === "UNKNOWN").length;
-  const authorizedToday = totalToday - unauthorizedToday;
+  const totalToday = todayStats.data?.total ?? 0;
+  const unauthorizedToday = todayStats.data?.unknown ?? 0;
+  const authorizedToday = todayStats.data?.authorized ?? 0;
   const activeCameras = cameras.filter((c) => c.active).length;
 
   const pieData = [
@@ -163,7 +163,6 @@ function DashboardPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {cameras.map((c) => {
-                const camEvents = events.filter((e) => e.camera_id === c.id).length;
                 const masked = c.rtsp_url.replace(/:\/\/.*?@/, "://●●●●@").replace(/\d+(?=\.\d+\/)/g, "x");
                 return (
                   <Card key={c.id} className="p-4">
@@ -175,7 +174,7 @@ function DashboardPage() {
                         </div>
                         <div className="text-[11px] text-muted-foreground mt-0.5">{c.id}</div>
                       </div>
-                      <Badge variant="outline" className="text-[10px]">{camEvents} {t("nav.events")}</Badge>
+                      <Badge variant="outline" className="text-[10px]">{c.id}</Badge>
                     </div>
                     <div className="text-[11px] font-mono text-muted-foreground truncate mb-3">{masked}</div>
                     <Button variant="outline" size="sm" className="w-full" onClick={() => navigate({ to: "/live", search: { camera: c.id } as never })}>

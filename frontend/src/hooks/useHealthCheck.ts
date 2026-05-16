@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchHealth } from "@/api/events";
 
-export function useHealthCheck(intervalMs = 10000) {
+export function useHealthCheck(intervalMs = 30000) {
   const q = useQuery({
     queryKey: ["health"],
     queryFn: fetchHealth,

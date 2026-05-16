@@ -14,16 +14,18 @@ class AsyncIOWorker:
 
     The main inference loop calls ``submit()`` which is non-blocking.  A
     single daemon thread drains the queue, writes the JPEG to disk, then
-    appends the event JSON.  If the queue is full (burst of alerts) the
-    submission is silently dropped to keep the main loop running.
+    appends the event JSON and persists to SQLite.  If the queue is full
+    (burst of alerts) the submission is silently dropped to keep the main
+    loop running.
 
     If snapshot writing fails, the event is still emitted with
     ``snapshot: null`` so the alert is never silently lost.
     """
 
-    def __init__(self, event_emitter, snapshot_writer, queue_size: int = 64):
+    def __init__(self, event_emitter, snapshot_writer, event_store=None, queue_size: int = 64):
         self._event_emitter = event_emitter
         self._snapshot_writer = snapshot_writer
+        self._event_store = event_store
         self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self._thread = threading.Thread(target=self._worker, daemon=True, name="io-worker")
         self._thread.start()
@@ -57,6 +59,11 @@ class AsyncIOWorker:
                 # snapshot_path is None if the write failed — emit event anyway
                 event_data["snapshot"] = snapshot_path
                 self._event_emitter.emit(event_data)
+                if self._event_store is not None:
+                    try:
+                        self._event_store.insert(event_data)
+                    except Exception as db_exc:
+                        log.error("EventStore insert failed: %s", db_exc)
             except Exception as e:
                 log.error("AsyncIOWorker error: %s", e, exc_info=True)
             finally:

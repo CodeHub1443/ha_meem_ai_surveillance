@@ -102,6 +102,9 @@ Thumbs.db
 # Snapshots
 snapshots/
 
+# Node
+node_modules/
+
 # Sessions
 whatsapp_session/
 

@@ -37,7 +37,10 @@
       "Bash(Sort-Object)",
       "Bash(cloudflared --version)",
       "Bash(npx wrangler *)",
-      "Bash(git restore *)"
+      "Bash(git restore *)",
+      "PowerShell($logFile = \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\logs\\\\events.jsonl\"; \\(Get-Item $logFile\\).Length / 1MB)",
+      "Bash(python tools/migrate_events.py)",
+      "Bash(npx tsc *)"
     ]
   }
 }

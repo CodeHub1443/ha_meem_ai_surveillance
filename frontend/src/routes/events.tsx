@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { format } from "date-fns";
 import { AppShell } from "@/components/layout/AppShell";
@@ -15,7 +15,7 @@ import { EventBadge } from "@/components/shared/EventBadge";
 import { ScoreBar } from "@/components/shared/ScoreBar";
 import { SnapshotModal } from "@/components/shared/SnapshotModal";
 import { useCameraList } from "@/context/SettingsContext";
-import { fetchEvents, SSE_EVENTS_URL } from "@/api/events";
+import { fetchEvents, fetchEventsCount, SSE_EVENTS_URL } from "@/api/events";
 import { useSSEStream } from "@/hooks/useSSEStream";
 import type { EventType, SurveillanceEvent } from "@/types/surveillance";
 import { Bell, Download } from "lucide-react";
@@ -35,6 +35,7 @@ function EventsPage() {
   const { t } = useTranslation();
   const cameras = useCameraList();
   const search = Route.useSearch();
+  const queryClient = useQueryClient();
 
   const [cameraId, setCameraId] = useState<string | undefined>(search.camera);
   const [eventType, setEventType] = useState<EventType | "ALL">("ALL");
@@ -43,77 +44,97 @@ function EventsPage() {
   const [endDate, setEndDate] = useState("");
   const [page, setPage] = useState(1);
   const [live, setLive] = useState(false);
-  const [extra, setExtra] = useState<SurveillanceEvent[]>([]);
   const [detail, setDetail] = useState<SurveillanceEvent | null>(null);
   const [snapshot, setSnapshot] = useState<string | null>(null);
 
   const [appliedFilters, setAppliedFilters] = useState({
-    camera_id: cameraId,
-    event_type: eventType,
+    camera_id: cameraId as string | undefined,
+    event_type: eventType as EventType | "ALL",
+    identity: "",
     since: undefined as string | undefined,
     until: undefined as string | undefined,
   });
 
+  // SSE: when live mode is on, refetch after each new event instead of accumulating in state
   const sse = useSSEStream(SSE_EVENTS_URL, live);
+  const prevSseLen = useRef(0);
   useEffect(() => {
-    if (live && sse.events.length) {
-      setExtra((prev) => [sse.events[0], ...prev].slice(0, 200));
+    if (!live) return;
+    if (sse.events.length > prevSseLen.current) {
+      prevSseLen.current = sse.events.length;
+      queryClient.invalidateQueries({ queryKey: ["events", "list"] });
+      queryClient.invalidateQueries({ queryKey: ["events", "count"] });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sse.events.length]);
+  }, [sse.events.length, live, queryClient]);
+
+  const queryKey = ["events", "list", appliedFilters, page];
+  const countKey = ["events", "count", appliedFilters];
 
   const q = useQuery({
-    queryKey: ["events", "list", appliedFilters],
+    queryKey,
     queryFn: () =>
       fetchEvents({
-        limit: 500,
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
         camera_id: appliedFilters.camera_id,
         event_type: appliedFilters.event_type === "ALL" ? undefined : appliedFilters.event_type,
+        identity: appliedFilters.identity || undefined,
         since: appliedFilters.since,
+        until: appliedFilters.until,
       }),
-    refetchInterval: 20000,
     retry: false,
   });
 
-  const merged = useMemo(() => {
-    const base = q.data || [];
-    const all = [...extra, ...base];
-    return all.filter((e) => {
-      if (identity && !(e.identity || "").toLowerCase().includes(identity.toLowerCase())) return false;
-      if (appliedFilters.until && new Date(e.timestamp) > new Date(appliedFilters.until)) return false;
-      return true;
-    });
-  }, [q.data, extra, identity, appliedFilters.until]);
+  const countQ = useQuery({
+    queryKey: countKey,
+    queryFn: () =>
+      fetchEventsCount({
+        camera_id: appliedFilters.camera_id,
+        event_type: appliedFilters.event_type === "ALL" ? undefined : appliedFilters.event_type,
+        identity: appliedFilters.identity || undefined,
+        since: appliedFilters.since,
+        until: appliedFilters.until,
+      }),
+    retry: false,
+  });
 
-  const totalPages = Math.max(1, Math.ceil(merged.length / PAGE_SIZE));
-  const pageRows = merged.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalCount = countQ.data ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const rows = q.data ?? [];
 
   const apply = () => {
     setAppliedFilters({
       camera_id: cameraId,
       event_type: eventType,
+      identity,
       since: startDate ? new Date(startDate).toISOString() : undefined,
-      until: endDate ? new Date(endDate).toISOString() : undefined,
+      until: endDate ? `${endDate}T23:59:59.999Z` : undefined,
     });
     setPage(1);
   };
 
   const reset = () => {
-    setCameraId(undefined); setEventType("ALL"); setIdentity(""); setStartDate(""); setEndDate("");
-    setAppliedFilters({ camera_id: undefined, event_type: "ALL", since: undefined, until: undefined });
+    setCameraId(undefined);
+    setEventType("ALL");
+    setIdentity("");
+    setStartDate("");
+    setEndDate("");
+    setAppliedFilters({ camera_id: undefined, event_type: "ALL", identity: "", since: undefined, until: undefined });
     setPage(1);
   };
 
   const exportCsv = () => {
     const header = ["timestamp", "camera_id", "track_id", "identity", "score", "event", "snapshot"];
-    const rows = merged.map((e) =>
+    const csvRows = rows.map((e) =>
       [e.timestamp, e.camera_id, e.track_id, e.identity ?? "", e.score, e.event, e.snapshot ?? ""].join(",")
     );
-    const csv = [header.join(","), ...rows].join("\n");
+    const csv = [header.join(","), ...csvRows].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `events_${Date.now()}.csv`; a.click();
+    a.href = url;
+    a.download = `events_${Date.now()}.csv`;
+    a.click();
     URL.revokeObjectURL(url);
   };
 
@@ -188,7 +209,7 @@ function EventsPage() {
             <p className="text-danger text-sm mb-3">{t("common.error")}</p>
             <Button size="sm" variant="outline" onClick={() => q.refetch()}>{t("common.retry")}</Button>
           </div>
-        ) : merged.length === 0 ? (
+        ) : rows.length === 0 ? (
           <div className="p-12 text-center">
             <Bell className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
             <p className="text-sm font-medium text-foreground">{t("events.noneTitle")}</p>
@@ -210,37 +231,34 @@ function EventsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {pageRows.map((e, i) => {
-                  const isNew = extra.includes(e);
-                  return (
-                    <tr key={`${e.timestamp}-${i}`} className={`hover:bg-primary/5 ${e.event === "UNKNOWN" ? "border-l-2 border-l-danger" : ""} ${isNew ? "flash-row" : ""}`}>
-                      <td className="px-4 py-2 text-xs text-muted-foreground tabular-nums">{(page - 1) * PAGE_SIZE + i + 1}</td>
-                      <td className="px-4 py-2 text-xs tabular-nums">{format(new Date(e.timestamp), "yyyy-MM-dd HH:mm:ss")}</td>
-                      <td className="px-4 py-2"><Badge variant="outline" className="text-[10px]">{e.camera_id}</Badge></td>
-                      <td className="px-4 py-2">{e.identity || <em className="text-muted-foreground">{t("events.unknown")}</em>}</td>
-                      <td className="px-4 py-2"><ScoreBar score={e.score} /></td>
-                      <td className="px-4 py-2"><EventBadge type={e.event} /></td>
-                      <td className="px-4 py-2">
-                        {e.snapshot ? (
-                          <button onClick={() => setSnapshot(e.snapshot)} className="h-10 w-10 rounded bg-muted overflow-hidden hover:ring-2 hover:ring-primary">
-                            <span className="text-[10px] text-muted-foreground flex items-center justify-center h-full">img</span>
-                          </button>
-                        ) : <span className="text-muted-foreground">—</span>}
-                      </td>
-                      <td className="px-4 py-2">
-                        <Button size="sm" variant="ghost" onClick={() => setDetail(e)}>{t("common.details")}</Button>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {rows.map((e, i) => (
+                  <tr key={`${e.timestamp}-${i}`} className={`hover:bg-primary/5 ${e.event === "UNKNOWN" ? "border-l-2 border-l-danger" : ""}`}>
+                    <td className="px-4 py-2 text-xs text-muted-foreground tabular-nums">{(page - 1) * PAGE_SIZE + i + 1}</td>
+                    <td className="px-4 py-2 text-xs tabular-nums">{format(new Date(e.timestamp), "yyyy-MM-dd HH:mm:ss")}</td>
+                    <td className="px-4 py-2"><Badge variant="outline" className="text-[10px]">{e.camera_id}</Badge></td>
+                    <td className="px-4 py-2">{e.identity || <em className="text-muted-foreground">{t("events.unknown")}</em>}</td>
+                    <td className="px-4 py-2"><ScoreBar score={e.score} /></td>
+                    <td className="px-4 py-2"><EventBadge type={e.event} /></td>
+                    <td className="px-4 py-2">
+                      {e.snapshot ? (
+                        <button onClick={() => setSnapshot(e.snapshot)} className="h-10 w-10 rounded bg-muted overflow-hidden hover:ring-2 hover:ring-primary">
+                          <span className="text-[10px] text-muted-foreground flex items-center justify-center h-full">img</span>
+                        </button>
+                      ) : <span className="text-muted-foreground">—</span>}
+                    </td>
+                    <td className="px-4 py-2">
+                      <Button size="sm" variant="ghost" onClick={() => setDetail(e)}>{t("common.details")}</Button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         )}
 
-        {merged.length > 0 && (
+        {totalCount > 0 && (
           <div className="flex items-center justify-between p-3 border-t text-xs text-muted-foreground">
-            <span>{t("events.page")} {page} {t("events.of")} {totalPages} · {merged.length}</span>
+            <span>{t("events.page")} {page} {t("events.of")} {totalPages} · {totalCount} {t("events.total")}</span>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>{t("events.prev")}</Button>
               <Button size="sm" variant="outline" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages}>{t("events.next")}</Button>

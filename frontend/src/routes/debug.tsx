@@ -28,7 +28,7 @@ function DebugPage() {
       <div className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <DebugStat icon={<Server className="h-5 w-5" />} label={t("debug.apiStatus")} value={health.isSuccess ? t("common.online") : t("common.offline")} tone={health.isSuccess ? "success" : "danger"} />
-          <DebugStat icon={<Bell className="h-5 w-5" />} label={t("debug.cachedEvents")} value={health.data?.cached_events ?? "—"} />
+          <DebugStat icon={<Bell className="h-5 w-5" />} label={t("debug.cachedEvents")} value={health.data?.total_events ?? "—"} />
           <DebugStat icon={<Activity className="h-5 w-5" />} label={t("debug.pipeline")} value={pstatus.data?.running ? t("common.running") : t("common.stopped")} tone={pstatus.data?.running ? "success" : "danger"} />
           <DebugStat icon={<Users className="h-5 w-5" />} label={t("debug.sseSubs")} value={subs.data?.count ?? "—"} />
         </div>
