@@ -60,7 +60,8 @@ class AsyncIOWorker:
                 )
                 # snapshot_path is None if the write failed — emit event anyway
                 event_data["snapshot"] = snapshot_path
-                self._event_emitter.emit(event_data)
+                # SQLite first so the row is committed before JSONL triggers SSE.
+                # If the frontend refetches immediately on SSE, the row is already there.
                 if self._event_store is not None:
                     try:
                         self._event_store.insert(event_data)
@@ -74,6 +75,7 @@ class AsyncIOWorker:
                             )
                     except Exception as db_exc:
                         log.error("EventStore insert failed: %s", db_exc)
+                self._event_emitter.emit(event_data)
             except Exception as e:
                 log.error("AsyncIOWorker error: %s", e, exc_info=True)
             finally:

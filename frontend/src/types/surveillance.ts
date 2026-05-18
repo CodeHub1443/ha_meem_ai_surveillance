@@ -8,6 +8,9 @@ export interface SurveillanceEvent {
   score: number;
   event: EventType;
   snapshot: string | null;
+  employee_id: string | null;
+  designation: string | null;
+  working_area: string | null;
 }
 
 export interface Camera {
@@ -55,10 +58,17 @@ export interface AppSettings {
   system: SystemSettings;
 }
 
+export type PersonStatus = "pending" | "enrolled";
+
 export interface Person {
   id: string;
   name: string;
+  employee_id: string | null;
+  designation: string | null;
+  working_area: string | null;
+  status: PersonStatus;
   sample_count: number;
   thumbnail_url: string | null;
   avg_accuracy: number | null;
+  created_at: string;
 }

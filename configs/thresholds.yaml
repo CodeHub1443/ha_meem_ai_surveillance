@@ -4,7 +4,7 @@ detection:
 
 recognition:
   similarity_threshold: 0.60
-  min_face_size: 80           # Minimum face width in pixels (original value)
+  min_face_size: 70           # Minimum face width in pixels (original value)
   blur_threshold: 30           # Upper cap for adaptive threshold (original was 100; 80 gives leeway for smaller faces)
   upgrade_margin: 0.05         # Extra score above threshold required to upgrade UNKNOWN → AUTHORIZED
   match_margin: 0.05           # Min gap between top-1 and top-2 identity scores; rejects near-ties
@@ -13,7 +13,7 @@ recognition:
 # Temporal fusion / aggregation
 fusion:
   buffer_size: 10              # Sliding window of frames per track
-  min_decision_seconds: 1.2   # Collect ~18 frames before first decision to reduce bad-angle false unknowns
+  min_decision_seconds: 0.50   # Collect ~18 frames before first decision to reduce bad-angle false unknowns
   recency_decay: 0.95          # Exponential weight decay (1.0 = no decay)
   expire_after_seconds: 5.0    # Raised: more time to accumulate frames per track
 

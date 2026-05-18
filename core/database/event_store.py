@@ -27,7 +27,7 @@ class EventStore:
 
     def _conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn"):
-            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            conn = sqlite3.connect(str(self.db_path))
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -37,6 +37,12 @@ class EventStore:
     def _init_schema(self):
         conn = self._conn()
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_meta VALUES ('version', '1');
+
             CREATE TABLE IF NOT EXISTS events (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp  TEXT NOT NULL,
@@ -170,10 +176,19 @@ class EventStore:
         conn.commit()
         return cur.lastrowid
 
-    def get_all_unknown_embeddings(self) -> List[Dict]:
-        """Return id, track_id, camera_id, timestamp, embedding blob for all rows."""
+    def get_all_unknown_embeddings(self, days: int = 90) -> List[Dict]:
+        """Return embeddings within the rolling window (default 90 days).
+
+        Caps the in-memory load fed to clustering — AgglomerativeClustering is
+        O(n²) so unbounded growth makes it unusable. Older rows stay in the DB
+        for audit purposes but are excluded from clustering runs.
+        """
         rows = self._conn().execute(
-            "SELECT id, track_id, camera_id, timestamp, embedding FROM unknown_embeddings"
+            """SELECT id, track_id, camera_id, timestamp, embedding
+               FROM unknown_embeddings
+               WHERE timestamp >= datetime('now', ?)
+               ORDER BY timestamp DESC""",
+            (f"-{days} days",),
         ).fetchall()
         return [dict(r) for r in rows]
 

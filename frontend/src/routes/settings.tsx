@@ -46,29 +46,35 @@ function SettingsPage() {
         </div>
       )}
 
-      <Tabs defaultValue="cameras">
+      <Tabs defaultValue="basic">
         <TabsList>
-          <TabsTrigger value="cameras">{t("settings.tabs.cameras")}</TabsTrigger>
-          <TabsTrigger value="recognition">{t("settings.tabs.recognition")}</TabsTrigger>
-          <TabsTrigger value="whatsapp">{t("settings.tabs.whatsapp")}</TabsTrigger>
-          <TabsTrigger value="system">{t("settings.tabs.system")}</TabsTrigger>
+          <TabsTrigger value="basic">{t("settings.tabs.basic")}</TabsTrigger>
+          <TabsTrigger value="advanced">{t("settings.tabs.advanced")}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="cameras" className="mt-4">
-          <CamerasTab draft={draft} setDraft={setDraft} />
+        <TabsContent value="basic" className="mt-4 space-y-6">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground mb-3">{t("settings.tabs.cameras")}</h3>
+            <CamerasTab draft={draft} setDraft={setDraft} />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-foreground mb-3">{t("settings.tabs.whatsapp")}</h3>
+            <WhatsAppTab draft={draft} setDraft={setDraft} />
+          </div>
         </TabsContent>
-        <TabsContent value="recognition" className="mt-4">
-          <RecognitionTab draft={draft} setDraft={setDraft} reset={resetRecognition} />
-        </TabsContent>
-        <TabsContent value="whatsapp" className="mt-4">
-          <WhatsAppTab draft={draft} setDraft={setDraft} />
-        </TabsContent>
-        <TabsContent value="system" className="mt-4">
-          <SystemTab draft={draft} setDraft={setDraft} />
+
+        <TabsContent value="advanced" className="mt-4 space-y-6">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground mb-3">{t("settings.tabs.recognition")}</h3>
+            <RecognitionTab draft={draft} setDraft={setDraft} reset={resetRecognition} />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-foreground mb-3">{t("settings.tabs.system")}</h3>
+            <SystemTab draft={draft} setDraft={setDraft} />
+          </div>
         </TabsContent>
       </Tabs>
 
-      {/* Reset to defaults handled in-tab */}
       <div className="hidden">{DEFAULT_SETTINGS.cameras.length}</div>
     </AppShell>
   );

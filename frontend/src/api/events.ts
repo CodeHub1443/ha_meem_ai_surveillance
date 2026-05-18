@@ -9,6 +9,9 @@ export interface EventsQuery {
   identity?: string;
   since?: string;
   until?: string;
+  employee_id?: string;
+  designation?: string;
+  working_area?: string;
 }
 
 export interface StatsSummary {
@@ -30,6 +33,9 @@ function buildQuery(q: EventsQuery): string {
   if (q.identity) p.set("identity", q.identity);
   if (q.since) p.set("since", q.since);
   if (q.until) p.set("until", q.until);
+  if (q.employee_id) p.set("employee_id", q.employee_id);
+  if (q.designation) p.set("designation", q.designation);
+  if (q.working_area) p.set("working_area", q.working_area);
   const s = p.toString();
   return s ? `?${s}` : "";
 }
@@ -53,6 +59,9 @@ export async function fetchEventsCount(query: Omit<EventsQuery, "limit" | "offse
   if (query.identity) p.set("identity", query.identity);
   if (query.since) p.set("since", query.since);
   if (query.until) p.set("until", query.until);
+  if (query.employee_id) p.set("employee_id", query.employee_id);
+  if (query.designation) p.set("designation", query.designation);
+  if (query.working_area) p.set("working_area", query.working_area);
   const qs = p.toString() ? `?${p}` : "";
   const res = await fetch(`${API_BASE_URL}/events/count${qs}`);
   if (!res.ok) throw new Error("Failed to fetch event count");

@@ -3,10 +3,12 @@ import base64
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import cv2
@@ -16,9 +18,9 @@ import yaml
 from core import frame_buffer as _fb
 from core.clustering import run_clustering
 from core.database.event_store import EventStore
+from core.database.person_store import PersonStore
 
 # ── Gallery cache ──────────────────────────────────────────────────────────────
-# Loaded once on first /persons request; reloaded if the file changes.
 _gallery_cache: Optional[Dict[str, Any]] = None
 _gallery_mtime: float = 0.0
 _gallery_lock = threading.Lock()
@@ -50,7 +52,8 @@ def _get_gallery() -> Dict[str, Any]:
                 return {}
         return _gallery_cache
 
-from fastapi import FastAPI, HTTPException, Query
+
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -60,14 +63,25 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="Ha-Meem AI Surveillance API")
 
-# Thread pool for blocking OpenCV operations (snapshot endpoint only)
 _snapshot_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="snapshot")
 
 CAMERAS_CONFIG = "configs/cameras.yaml"
 
 
+def _load_aligned_faces_dir() -> str:
+    try:
+        with open("configs/dataset.yaml") as f:
+            cfg = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        cfg = {}
+    # Mirror the path build_gallery.py reads so uploads land where the build expects them
+    return cfg.get("dataset", {}).get("aligned_faces", "dataset/aligned_faces")
+
+
+ALIGNED_FACES_DIR = _load_aligned_faces_dir()
+
+
 def _load_cameras() -> List[Dict]:
-    """Read cameras list from cameras.yaml. Returns empty list on any error."""
     try:
         with open(CAMERAS_CONFIG) as f:
             cfg = yaml.safe_load(f) or {}
@@ -81,19 +95,17 @@ def _load_cameras() -> List[Dict]:
 
 
 def _capture_frame(rtsp_url: str):
-    """Open RTSP stream, grab a fresh frame, return (success, frame)."""
     cap = cv2.VideoCapture(rtsp_url)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    # Drain stale buffered frames so we get the most current image
     for _ in range(4):
         cap.grab()
     ret, frame = cap.read()
     cap.release()
     return ret, frame
 
+
 # ── CORS ───────────────────────────────────────────────────────────────────────
-# Allow the Vite dev server (and any local origin) to call this API.
-# In production, replace ["*"] with your actual frontend origin.
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -103,32 +115,35 @@ app.add_middleware(
 )
 
 # ── Static files ───────────────────────────────────────────────────────────────
-# Serve captured snapshots so the frontend can display them by URL.
-# The pipeline writes to snapshots/YYYY-MM-DD/filename.jpg
-# Frontend accesses them as: http://localhost:8000/snapshots/2025-01-15/file.jpg
+
 os.makedirs("snapshots", exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
 
-# Serve aligned face crops for the gallery enrolled-persons view.
-# Frontend accesses them as: http://localhost:8000/faces/person_name/frame_001.jpg
-_aligned_faces_dir = os.path.join("data", "aligned_faces")
-os.makedirs(_aligned_faces_dir, exist_ok=True)
-app.mount("/faces", StaticFiles(directory=_aligned_faces_dir), name="faces")
+os.makedirs(ALIGNED_FACES_DIR, exist_ok=True)
+app.mount("/faces", StaticFiles(directory=ALIGNED_FACES_DIR), name="faces")
 
 LOG_FILE = "logs/events.jsonl"
 
-# ── SQLite event store (authoritative for all queries) ─────────────────────────
+# ── Stores ─────────────────────────────────────────────────────────────────────
 
 _event_store = EventStore()
+_person_store = PersonStore()
 
 # ── SSE subscriber queues ──────────────────────────────────────────────────────
 
 _sse_subscribers: List[asyncio.Queue] = []
 _sse_lock = threading.Lock()
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _sse_put_nowait(q: asyncio.Queue, event: dict) -> None:
+    try:
+        q.put_nowait(event)
+    except asyncio.QueueFull:
+        pass
 
 
 def _tail_log_file():
-    """Background thread: tail the JSONL log and push new events to SSE subscribers."""
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     last_size = os.path.getsize(LOG_FILE) if os.path.exists(LOG_FILE) else 0
 
@@ -145,12 +160,12 @@ def _tail_log_file():
                                 continue
                             try:
                                 event = json.loads(line)
-                                with _sse_lock:
-                                    for q in list(_sse_subscribers):
-                                        try:
-                                            q.put_nowait(event)
-                                        except asyncio.QueueFull:
-                                            pass
+                                if _event_loop and not _event_loop.is_closed():
+                                    with _sse_lock:
+                                        for q in list(_sse_subscribers):
+                                            _event_loop.call_soon_threadsafe(
+                                                _sse_put_nowait, q, event
+                                            )
                             except json.JSONDecodeError:
                                 pass
                     last_size = size
@@ -158,18 +173,20 @@ def _tail_log_file():
                     last_size = 0
         except Exception as e:
             log.error("Log tail error: %s", e)
-        time.sleep(1.0)
+        time.sleep(0.1)
 
 
 # ── Startup ────────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
     t = threading.Thread(target=_tail_log_file, daemon=True, name="log-tailer")
     t.start()
 
 
-# ── Models ─────────────────────────────────────────────────────────────────────
+# ── Pydantic models ─────────────────────────────────────────────────────────────
 
 class SurveillanceEvent(BaseModel):
     timestamp: str
@@ -179,6 +196,35 @@ class SurveillanceEvent(BaseModel):
     score: float
     event: str
     snapshot: Optional[str] = None
+    employee_id: Optional[str] = None
+    designation: Optional[str] = None
+    working_area: Optional[str] = None
+
+
+class PersonOut(BaseModel):
+    id: str
+    name: str
+    employee_id: Optional[str] = None
+    designation: Optional[str] = None
+    working_area: Optional[str] = None
+    status: str
+    thumbnail_url: Optional[str] = None
+    sample_count: int = 0
+    avg_accuracy: Optional[float] = None
+    created_at: str
+
+
+class PersonCreate(BaseModel):
+    name: str
+    employee_id: Optional[str] = None
+    designation: Optional[str] = None
+    working_area: Optional[str] = None
+
+
+class PersonUpdate(BaseModel):
+    employee_id: Optional[str] = None
+    designation: Optional[str] = None
+    working_area: Optional[str] = None
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -202,19 +248,99 @@ def health_check():
     return {"status": "ok", "total_events": _event_store.count()}
 
 
+# ── Events ─────────────────────────────────────────────────────────────────────
+
+def _events_with_person_data(
+    camera_id: Optional[str] = None,
+    identity: Optional[str] = None,
+    event_type: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    designation: Optional[str] = None,
+    working_area: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> List[Dict]:
+    """Query events with a LEFT JOIN on persons for employee metadata.
+    Employee filter params narrow results to only events with matching person records.
+    """
+    clauses: List[str] = []
+    params: List = []
+
+    if camera_id:
+        clauses.append("e.camera_id = ?"); params.append(camera_id)
+    if identity:
+        clauses.append("e.identity LIKE ?"); params.append(f"%{identity}%")
+    if event_type:
+        clauses.append("e.event_type = ?"); params.append(event_type.upper())
+    if since:
+        clauses.append("e.timestamp >= ?"); params.append(since)
+    if until:
+        clauses.append("e.timestamp <= ?"); params.append(until)
+    if employee_id:
+        clauses.append("p.employee_id LIKE ?"); params.append(f"%{employee_id}%")
+    if designation:
+        clauses.append("p.designation LIKE ?"); params.append(f"%{designation}%")
+    if working_area:
+        clauses.append("p.working_area LIKE ?"); params.append(f"%{working_area}%")
+
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.extend([limit, offset])
+
+    sql = f"""
+        SELECT e.timestamp, e.camera_id, e.track_id, e.identity, e.score,
+               e.event_type AS event, e.snapshot,
+               p.employee_id, p.designation, p.working_area
+        FROM events e
+        LEFT JOIN persons p ON e.identity = p.id
+        {where}
+        ORDER BY e.timestamp DESC
+        LIMIT ? OFFSET ?
+    """
+    rows = _person_store._conn().execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _events_count_with_person_filters(
+    camera_id=None, identity=None, event_type=None,
+    since=None, until=None,
+    employee_id=None, designation=None, working_area=None,
+) -> int:
+    clauses: List[str] = []
+    params: List = []
+
+    if camera_id:
+        clauses.append("e.camera_id = ?"); params.append(camera_id)
+    if identity:
+        clauses.append("e.identity LIKE ?"); params.append(f"%{identity}%")
+    if event_type:
+        clauses.append("e.event_type = ?"); params.append(event_type.upper())
+    if since:
+        clauses.append("e.timestamp >= ?"); params.append(since)
+    if until:
+        clauses.append("e.timestamp <= ?"); params.append(until)
+    if employee_id:
+        clauses.append("p.employee_id LIKE ?"); params.append(f"%{employee_id}%")
+    if designation:
+        clauses.append("p.designation LIKE ?"); params.append(f"%{designation}%")
+    if working_area:
+        clauses.append("p.working_area LIKE ?"); params.append(f"%{working_area}%")
+
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = f"SELECT COUNT(*) FROM events e LEFT JOIN persons p ON e.identity = p.id {where}"
+    return _person_store._conn().execute(sql, params).fetchone()[0]
+
+
 @app.get("/events/latest", response_model=List[SurveillanceEvent])
 def get_latest_events(
     limit: int = Query(default=20, ge=1, le=500),
     camera_id: Optional[str] = Query(default=None),
     identity: Optional[str] = Query(default=None),
-    event_type: Optional[str] = Query(default=None, description="AUTHORIZED or UNKNOWN"),
+    event_type: Optional[str] = Query(default=None),
 ):
-    """Most recent N events from the database, newest first."""
-    return _event_store.query(
-        camera_id=camera_id,
-        identity=identity,
-        event_type=event_type,
-        limit=limit,
+    return _events_with_person_data(
+        camera_id=camera_id, identity=identity, event_type=event_type, limit=limit
     )
 
 
@@ -225,18 +351,17 @@ def get_all_events(
     camera_id: Optional[str] = Query(default=None),
     identity: Optional[str] = Query(default=None),
     event_type: Optional[str] = Query(default=None),
-    since: Optional[str] = Query(default=None, description="ISO timestamp lower bound"),
-    until: Optional[str] = Query(default=None, description="ISO timestamp upper bound"),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    designation: Optional[str] = Query(default=None),
+    working_area: Optional[str] = Query(default=None),
 ):
-    """Paginated events from the database, newest first."""
-    return _event_store.query(
-        camera_id=camera_id,
-        identity=identity,
-        event_type=event_type,
-        since=since,
-        until=until,
-        limit=limit,
-        offset=offset,
+    return _events_with_person_data(
+        camera_id=camera_id, identity=identity, event_type=event_type,
+        since=since, until=until,
+        employee_id=employee_id, designation=designation, working_area=working_area,
+        limit=limit, offset=offset,
     )
 
 
@@ -247,15 +372,15 @@ def get_events_count(
     event_type: Optional[str] = Query(default=None),
     since: Optional[str] = Query(default=None),
     until: Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    designation: Optional[str] = Query(default=None),
+    working_area: Optional[str] = Query(default=None),
 ):
-    """Total row count matching the given filters (for pagination UIs)."""
     return {
-        "count": _event_store.count(
-            camera_id=camera_id,
-            identity=identity,
-            event_type=event_type,
-            since=since,
-            until=until,
+        "count": _events_count_with_person_filters(
+            camera_id=camera_id, identity=identity, event_type=event_type,
+            since=since, until=until,
+            employee_id=employee_id, designation=designation, working_area=working_area,
         )
     }
 
@@ -263,10 +388,9 @@ def get_events_count(
 @app.get("/stats/summary")
 def get_stats_summary(
     camera_id: Optional[str] = Query(default=None),
-    since: Optional[str] = Query(default=None, description="ISO timestamp lower bound"),
-    until: Optional[str] = Query(default=None, description="ISO timestamp upper bound"),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
 ):
-    """Authorized vs unknown counts, unique known persons, and unique unauthorized persons."""
     authorized = _event_store.count(camera_id=camera_id, event_type="AUTHORIZED", since=since, until=until)
     unknown = _event_store.count(camera_id=camera_id, event_type="UNKNOWN", since=since, until=until)
     unique_persons = _event_store.count_unique_identities(camera_id=camera_id, since=since, until=until)
@@ -283,31 +407,23 @@ def get_stats_summary(
     }
 
 
+# ── Clustering ─────────────────────────────────────────────────────────────────
+
+_clustering_lock = threading.Lock()
+
+
 @app.get("/cluster/unknowns/groups")
 def get_cluster_groups(max_snapshots: int = Query(default=4, ge=1, le=10)):
-    """Return each cluster and singleton with sample snapshots for visual verification."""
     return _event_store.get_cluster_groups(max_snapshots=max_snapshots)
 
 
 @app.post("/cluster/unknowns")
 def trigger_clustering(
     min_cluster_size: int = Query(default=2, ge=2, le=50),
-    distance_threshold: float = Query(
-        default=0.45,
-        ge=0.1,
-        le=1.0,
-        description=(
-            "Cosine distance ceiling for merging two tracks into the same cluster "
-            "(1 − cosine_similarity). Lower = stricter. "
-            "0.3 = similarity>0.7, 0.45 = similarity>0.55, 0.6 = similarity>0.4."
-        ),
-    ),
+    distance_threshold: float = Query(default=0.45, ge=0.1, le=1.0),
 ):
-    """Run agglomerative clustering on stored unknown face embeddings.
-
-    This is a blocking call — it returns once clustering is complete.
-    Typical runtime: <5 s for tens of thousands of embeddings.
-    """
+    if not _clustering_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Clustering already in progress")
     try:
         result = run_clustering(
             min_cluster_size=min_cluster_size,
@@ -316,11 +432,14 @@ def trigger_clustering(
         return {"status": "ok", **result}
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        _clustering_lock.release()
 
+
+# ── SSE ────────────────────────────────────────────────────────────────────────
 
 @app.get("/events/stream")
 async def stream_events():
-    """Server-Sent Events stream — pushes new events in real time."""
     q: asyncio.Queue = asyncio.Queue(maxsize=64)
     with _sse_lock:
         _sse_subscribers.append(q)
@@ -332,8 +451,6 @@ async def stream_events():
                     event = await asyncio.wait_for(q.get(), timeout=30.0)
                     yield f"data: {json.dumps(event)}\n\n"
                 except asyncio.TimeoutError:
-                    # Send a keepalive comment every 30 s to prevent proxy/browser
-                    # from closing the connection during quiet periods.
                     yield ": keepalive\n\n"
         except asyncio.CancelledError:
             pass
@@ -351,20 +468,16 @@ async def stream_events():
     )
 
 
-# ── Persons (gallery) routes ───────────────────────────────────────────────────
+# ── Persons (gallery metadata) ─────────────────────────────────────────────────
 
-@app.get("/persons")
-def list_persons():
-    """Return enrolled persons from the gallery with sample counts and avg recognition accuracy."""
+def _enrich_persons(persons: List[Dict]) -> List[PersonOut]:
+    """Merge PersonStore records with live gallery stats (sample count, avg accuracy)."""
     gallery = _get_gallery()
-    if not gallery:
-        return []
 
-    # Per-identity avg score and most-recent snapshot from AUTHORIZED events
     rows = _event_store._conn().execute("""
         SELECT identity,
-               AVG(score)       AS avg_score,
-               MAX(snapshot)    AS latest_snapshot
+               AVG(score)    AS avg_score,
+               MAX(snapshot) AS latest_snapshot
         FROM events
         WHERE event_type = 'AUTHORIZED' AND identity IS NOT NULL
         GROUP BY identity
@@ -372,26 +485,189 @@ def list_persons():
     stats: Dict[str, dict] = {r["identity"]: dict(r) for r in rows}
 
     result = []
-    for name, embeddings in gallery.items():
+    for p in persons:
+        name = p["name"]
         s = stats.get(name, {})
         avg_score = s.get("avg_score")
-        avg_accuracy = round(float(avg_score) * 100, 1) if avg_score is not None else None
-        result.append({
-            "id": name.lower().replace(" ", "_"),
-            "name": name,
-            "sample_count": len(embeddings),
-            "thumbnail_url": s.get("latest_snapshot"),
-            "avg_accuracy": avg_accuracy,
-        })
+        embeddings = gallery.get(name, [])
+        thumbnail = p.get("thumbnail_url") or s.get("latest_snapshot")
+        result.append(PersonOut(
+            id=p["id"],
+            name=name,
+            employee_id=p.get("employee_id"),
+            designation=p.get("designation"),
+            working_area=p.get("working_area"),
+            status=p["status"],
+            thumbnail_url=thumbnail,
+            sample_count=len(embeddings),
+            avg_accuracy=round(float(avg_score) * 100, 1) if avg_score is not None else None,
+            created_at=p["created_at"],
+        ))
+    return result
 
-    return sorted(result, key=lambda x: x["name"].lower())
+
+@app.get("/persons", response_model=List[PersonOut])
+def list_persons(status: Optional[str] = Query(default=None, description="'pending' or 'enrolled'")):
+    """Return persons filtered by status. Enriched with gallery sample count and avg accuracy."""
+    if status and status not in ("pending", "enrolled"):
+        raise HTTPException(status_code=400, detail="status must be 'pending' or 'enrolled'")
+    persons = _person_store.list(status=status)
+    return _enrich_persons(persons)
 
 
-# ── Camera routes ──────────────────────────────────────────────────────────────
+@app.post("/persons", response_model=PersonOut, status_code=201)
+def create_person(
+    name: str = Form(...),
+    employee_id: Optional[str] = Form(default=None),
+    designation: Optional[str] = Form(default=None),
+    working_area: Optional[str] = Form(default=None),
+    images: List[UploadFile] = File(default=[]),
+):
+    """Create a new person (status=pending) and optionally upload face images."""
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    person_id = name.lower().replace(" ", "_")
+    if _person_store.exists(person_id):
+        raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
+
+    # Save uploaded face images to aligned_faces dir
+    person_dir = Path(ALIGNED_FACES_DIR) / person_id
+    person_dir.mkdir(parents=True, exist_ok=True)
+
+    thumbnail_url = None
+    for idx, img_file in enumerate(images):
+        if not img_file.content_type or not img_file.content_type.startswith("image/"):
+            continue
+        ext = Path(img_file.filename or "frame.jpg").suffix or ".jpg"
+        dest = person_dir / f"frame_{idx:03d}{ext}"
+        with open(dest, "wb") as f:
+            f.write(img_file.file.read())
+        if thumbnail_url is None:
+            thumbnail_url = f"/faces/{person_id}/{dest.name}"
+
+    try:
+        person_id = _person_store.create(
+            name=name,
+            employee_id=employee_id or None,
+            designation=designation or None,
+            working_area=working_area or None,
+            thumbnail_url=thumbnail_url,
+        )
+    except Exception as exc:
+        import sqlite3
+        if isinstance(exc, sqlite3.IntegrityError):
+            raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
+        raise
+
+    p = _person_store.get(person_id)
+    return _enrich_persons([p])[0]
+
+
+@app.patch("/persons/{person_id}", response_model=PersonOut)
+def update_person(person_id: str, body: PersonUpdate):
+    """Update employee metadata for a person."""
+    if not _person_store.exists(person_id):
+        raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
+    _person_store.update(
+        person_id,
+        employee_id=body.employee_id,
+        designation=body.designation,
+        working_area=body.working_area,
+    )
+    p = _person_store.get(person_id)
+    return _enrich_persons([p])[0]
+
+
+@app.delete("/persons/{person_id}", status_code=204)
+def delete_person(person_id: str):
+    """Delete a person record and their aligned face images."""
+    if not _person_store.exists(person_id):
+        raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
+    _person_store.delete(person_id)
+    # Remove aligned face crops from disk
+    person_dir = Path(ALIGNED_FACES_DIR) / person_id
+    if person_dir.exists():
+        shutil.rmtree(person_dir, ignore_errors=True)
+
+
+@app.get("/persons/{person_id}", response_model=PersonOut)
+def get_person(person_id: str):
+    p = _person_store.get(person_id)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
+    return _enrich_persons([p])[0]
+
+
+@app.get("/persons/{person_id}/samples")
+def get_person_samples(person_id: str):
+    """Return URLs for all aligned face crop images stored for a person."""
+    person_dir = Path(ALIGNED_FACES_DIR) / person_id
+    if not person_dir.exists():
+        return {"urls": []}
+    exts = {".jpg", ".jpeg", ".png", ".webp"}
+    files = sorted(f for f in person_dir.iterdir() if f.suffix.lower() in exts)
+    urls = [f"/faces/{person_id}/{f.name}" for f in files]
+    return {"urls": urls}
+
+
+# ── Gallery build ──────────────────────────────────────────────────────────────
+
+_build_status: Dict[str, Any] = {"running": False, "last_result": None}
+_build_lock = threading.Lock()
+
+
+def _run_build_gallery():
+    """Blocking gallery build — called in a thread. Updates _build_status on completion."""
+    global _build_status
+    try:
+        # Import here to avoid loading heavy CV deps at module level
+        from apps.dataset_tools.build_gallery import main as _build_gallery_main
+        built_ids = _build_gallery_main()  # returns set of person_id strings built
+        built_ids = built_ids or set()
+        n_enrolled = _person_store.enroll_by_ids(built_ids)
+        with _build_lock:
+            _build_status = {
+                "running": False,
+                "last_result": {"persons_enrolled": n_enrolled, "success": True},
+            }
+    except Exception as exc:
+        log.error("Gallery build failed: %s", exc)
+        with _build_lock:
+            _build_status = {
+                "running": False,
+                "last_result": {"success": False, "error": str(exc)},
+            }
+
+
+@app.post("/gallery/build")
+def build_gallery_endpoint():
+    """Trigger a gallery rebuild in the background. Returns immediately."""
+    with _build_lock:
+        if _build_status["running"]:
+            raise HTTPException(status_code=409, detail="Gallery build already in progress")
+        _build_status["running"] = True
+
+    t = threading.Thread(target=_run_build_gallery, daemon=True, name="gallery-build")
+    t.start()
+    return {"status": "started"}
+
+
+@app.get("/gallery/build/status")
+def gallery_build_status():
+    """Poll the status of the most recent gallery build."""
+    with _build_lock:
+        return {
+            "running": _build_status["running"],
+            "last_result": _build_status["last_result"],
+        }
+
+
+# ── Cameras ────────────────────────────────────────────────────────────────────
 
 @app.get("/cameras")
 def list_cameras():
-    """Return all cameras from cameras.yaml (id, name, active status, roi)."""
     cameras = _load_cameras()
     return [
         {
@@ -406,57 +682,36 @@ def list_cameras():
 
 @app.post("/cameras/{camera_id}/snapshot")
 async def capture_snapshot(camera_id: str):
-    """
-    Capture a single JPEG frame from the camera's RTSP stream.
-    Returns { image_base64: str, timestamp: str }.
-    Runs the blocking OpenCV grab in a thread pool so the async loop stays free.
-    """
     cameras = _load_cameras()
     cam = next((c for c in cameras if c.get("id") == camera_id), None)
 
     if cam is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Camera '{camera_id}' not found in {CAMERAS_CONFIG}",
-        )
+        raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found in {CAMERAS_CONFIG}")
 
     rtsp_url = cam.get("url")
     if not rtsp_url:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Camera '{camera_id}' has no RTSP URL configured",
-        )
+        raise HTTPException(status_code=400, detail=f"Camera '{camera_id}' has no RTSP URL configured")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         ret, frame = await asyncio.wait_for(
             loop.run_in_executor(_snapshot_executor, _capture_frame, rtsp_url),
             timeout=15.0,
         )
     except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail="Snapshot timed out — camera may be offline or unreachable",
-        )
+        raise HTTPException(status_code=504, detail="Snapshot timed out — camera may be offline")
 
     if not ret or frame is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Could not read frame from camera stream",
-        )
+        raise HTTPException(status_code=503, detail="Could not read frame from camera stream")
 
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     img_b64 = base64.b64encode(buf.tobytes()).decode()
 
-    return {
-        "image_base64": img_b64,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
+    return {"image_base64": img_b64, "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/cameras/{camera_id}/stream-status")
 def stream_status(camera_id: str):
-    """Quick check: is the pipeline pushing fresh frames for this camera?"""
     age = _fb.age(camera_id)
     if age is None:
         return {"active": False, "age_seconds": None, "reason": "no frames yet — pipeline may not be running"}
@@ -466,7 +721,7 @@ def stream_status(camera_id: str):
 
 @app.get("/cameras/{camera_id}/stream")
 async def stream_camera(camera_id: str):
-    """MJPEG stream for the browser. Reads annotated frames from the in-memory frame buffer."""
+    """MJPEG stream — serves annotated frames from the pipeline frame buffer."""
     cameras = _load_cameras()
     cam = next((c for c in cameras if c.get("id") == camera_id), None)
     if cam is None:
@@ -474,20 +729,24 @@ async def stream_camera(camera_id: str):
 
     async def generate() -> AsyncGenerator[bytes, None]:
         last_jpeg: bytes = b""
+        stale_since = time.monotonic()
         try:
             while True:
                 jpeg = _fb.get(camera_id)
-                if jpeg is None:
-                    await asyncio.sleep(0.5)
+                if jpeg is None or jpeg is last_jpeg:
+                    if time.monotonic() - stale_since > 15.0:
+                        log.warning("MJPEG stream for %s: no new frames for 15s, closing", camera_id)
+                        break
+                    await asyncio.sleep(0.1)
                     continue
-                if jpeg is not last_jpeg:
-                    last_jpeg = jpeg
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n"
-                        + jpeg
-                        + b"\r\n"
-                    )
+                stale_since = time.monotonic()
+                last_jpeg = jpeg
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + jpeg
+                    + b"\r\n"
+                )
                 await asyncio.sleep(0.066)  # ~15 fps
         except asyncio.CancelledError:
             pass

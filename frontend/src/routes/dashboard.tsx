@@ -9,11 +9,10 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EventBadge } from "@/components/shared/EventBadge";
-import { CameraStatusDot } from "@/components/shared/CameraStatusDot";
 import { fetchLatestEvents, fetchStatsSummary } from "@/api/events";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
 import { useCameraList } from "@/context/SettingsContext";
-import { Activity, AlertTriangle, Camera as CameraIcon, ShieldCheck, Bell } from "lucide-react";
+import { AlertTriangle, Camera as CameraIcon, ShieldCheck, Bell } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard")({ component: DashboardPage });
 
@@ -139,39 +138,6 @@ function DashboardPage() {
           </Card>
         </div>
 
-        {/* Camera overview */}
-        <div>
-          <h2 className="text-sm font-semibold text-foreground mb-3">{t("dashboard.cameraOverview")}</h2>
-          {cameras.length === 0 ? (
-            <Card className="p-8">
-              <EmptyState title={t("dashboard.noCameras")} body="" />
-            </Card>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {cameras.map((c) => {
-                const masked = c.rtsp_url.replace(/:\/\/.*?@/, "://●●●●@").replace(/\d+(?=\.\d+\/)/g, "x");
-                return (
-                  <Card key={c.id} className="p-4">
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <CameraStatusDot active={c.active} />
-                          <span className="font-medium text-sm text-foreground truncate">{c.name}</span>
-                        </div>
-                        <div className="text-[11px] text-muted-foreground mt-0.5">{c.id}</div>
-                      </div>
-                      <Badge variant="outline" className="text-[10px]">{c.id}</Badge>
-                    </div>
-                    <div className="text-[11px] font-mono text-muted-foreground truncate mb-3">{masked}</div>
-                    <Button variant="outline" size="sm" className="w-full" onClick={() => navigate({ to: "/live", search: { camera: c.id } as never })}>
-                      <Activity className="h-3.5 w-3.5 mr-2" /> {t("dashboard.viewLive")}
-                    </Button>
-                  </Card>
-                );
-              })}
-            </div>
-          )}
-        </div>
       </div>
     </AppShell>
   );

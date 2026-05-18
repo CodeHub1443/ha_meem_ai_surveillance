@@ -69,7 +69,8 @@ def _kmeans_prototypes(embeddings: np.ndarray, k: int) -> np.ndarray:
         return embeddings[:k]
 
 
-def main():
+def main() -> set:
+    """Build the gallery from aligned face crops. Returns the set of person_id strings enrolled."""
     config = _load_config()
 
     dataset_cfg = config.get("dataset", {})
@@ -94,7 +95,7 @@ def main():
     subdirs = sorted(d for d in aligned_dir.iterdir() if d.is_dir())
     if not subdirs:
         print(f"No identity folders found in {aligned_dir}")
-        return
+        return set()
 
     print(f"Building gallery — input: {aligned_dir}")
     print("-" * 50)
@@ -191,6 +192,8 @@ def main():
     else:
         print("\nNo inter-class proximity issues found.")
     print("-" * 50)
+
+    return set(gallery.keys())
 
 
 if __name__ == "__main__":

@@ -159,9 +159,6 @@ class CameraWorker:
         self._logged_size_reject: set = set()
         self._logged_blur_reject: set = set()
 
-        # Latest annotated frame — read by the main display thread
-        self._display_frame: Optional[np.ndarray] = None
-        self._frame_lock = threading.Lock()
         self.running = False
 
         self._last_stream_ts: float = 0.0
@@ -306,8 +303,7 @@ class CameraWorker:
             )
 
             if upgradeable:
-                # Require identity found AND score exceeds threshold by margin
-                if identity is None or score < self.similarity_threshold + self.upgrade_margin:
+                if identity is None or score < self.similarity_threshold:
                     continue
                 log.info(
                     f"[{self.camera_id}] UPGRADE track={face.track_id}: "
@@ -344,17 +340,21 @@ class CameraWorker:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
             )
 
+            # Resize to stream resolution once for snapshot/hold — avoids a ~6 MB
+            # full-res copy on the hot path (io_worker copies again inside submit).
+            snap_frame = cv2.resize(annotated, (_STREAM_WIDTH, _STREAM_HEIGHT))
+
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
                 self.state.hold_unknown(
-                    face.track_id, annotated.copy(), event_data, consensus
+                    face.track_id, snap_frame, event_data, consensus
                 )
                 log.info(
                     f"[{self.camera_id}] HOLD UNKNOWN track={face.track_id} "
                     f"score={score:.3f} (waiting up to {self.unknown_hold_seconds:.0f}s)"
                 )
             else:
-                self.io_worker.submit(annotated, event_data, emit_identity, frame_ts, None)
+                self.io_worker.submit(snap_frame, event_data, emit_identity, frame_ts, None)
                 log.info(
                     f"[{self.camera_id}] {emit_event}: "
                     f"{emit_identity or 'Unknown'} score={score:.3f}"
@@ -435,9 +435,6 @@ class CameraWorker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 80, 0), 2,
                     )
 
-                    with self._frame_lock:
-                        self._display_frame = annotated
-
                     # Throttled encode + push to in-memory frame buffer
                     now_s = time.perf_counter()
                     if now_s - self._last_stream_ts >= _STREAM_INTERVAL:
@@ -468,11 +465,7 @@ class CameraWorker:
         log.info(f"[{self.camera_id}] Worker stopped")
 
     def _reconnect_with_backoff(self, delays: list):
-        """Wait with escalating delays before the next reconnect attempt.
-        
-        This prevents the system from hammering a down camera or network interface
-        and allows for self-recovery during transient failures.
-        """
+        """Wait with escalating delays before the next reconnect attempt."""
         for i, delay in enumerate(delays):
             log.info(
                 f"[{self.camera_id}] Reconnecting in {delay}s "
@@ -482,12 +475,7 @@ class CameraWorker:
                 if not self.running:
                     return
                 time.sleep(1)
-            return
         log.error(f"[{self.camera_id}] All reconnect attempts exhausted — worker exiting")
-
-    def get_display_frame(self) -> Optional[np.ndarray]:
-        with self._frame_lock:
-            return self._display_frame.copy() if self._display_frame is not None else None
 
     def set_roi(self, roi: Optional[list]):
         self.roi = tuple(roi) if roi else None

@@ -83,6 +83,9 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       void queryClient.invalidateQueries({ queryKey: ["report-count"] });
       void queryClient.invalidateQueries({ queryKey: ["report-events"] });
 
+      // ── 4b. Invalidate events-page stats summary
+      void queryClient.invalidateQueries({ queryKey: ["stats", "events-page"] });
+
       // ── 5. Refresh person gallery on AUTHORIZED (new snapshot + updated avg)
       if (event.event === "AUTHORIZED") {
         void queryClient.invalidateQueries({ queryKey: ["persons"] });
@@ -95,7 +98,14 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
         });
       }
 
-      // ── 7. Notify local subscribers (e.g. events page live-mode auto-scroll)
+      // ── 7. Update live page event grid directly (no HTTP round-trip)
+      queryClient.setQueryData(
+        ["events", "live-grid"],
+        (old: SurveillanceEvent[] | undefined) =>
+          old ? [event, ...old].slice(0, 12) : [event],
+      );
+
+      // ── 8. Notify local subscribers (e.g. events page live-mode auto-scroll)
       listenersRef.current.forEach((cb) => cb(event));
     };
 
