@@ -68,9 +68,9 @@ export async function deletePerson(id: string): Promise<void> {
 
 export async function fetchPersonSamples(personId: string): Promise<string[]> {
   const res = await fetch(`${API_BASE_URL}/persons/${personId}/samples`);
-  if (!res.ok) return [];
-  const data = await res.json() as { urls: string[] };
-  return data.urls;
+  if (!res.ok) throw new Error(`Failed to fetch samples: ${res.status}`);
+  const data = await res.json() as { urls?: unknown };
+  return Array.isArray(data?.urls) ? (data.urls as string[]) : [];
 }
 
 // ── Gallery build ──────────────────────────────────────────────────────────────

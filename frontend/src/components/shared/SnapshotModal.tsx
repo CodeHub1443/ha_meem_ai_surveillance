@@ -1,7 +1,9 @@
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
-import { Download } from "lucide-react";
+import { Download, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { snapshotUrl } from "@/api/events";
 
 export function SnapshotModal({
   open,
@@ -15,29 +17,72 @@ export function SnapshotModal({
   title?: string;
 }) {
   const { t } = useTranslation();
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>{title || t("events.snapshot")}</DialogTitle>
-        </DialogHeader>
-        <div className="bg-muted rounded-md overflow-hidden flex items-center justify-center min-h-[300px]">
-          {src ? (
-            <img src={src} alt="snapshot" className="max-h-[70vh] w-auto" />
+  const resolvedSrc = snapshotUrl(src);
+
+  // Close on Escape
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onOpenChange(false);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [open, onOpenChange]);
+
+  if (!open) return null;
+
+  return createPortal(
+    // Backdrop — click anywhere outside the card closes the modal.
+    // No body scroll lock so the rest of the UI stays interactive.
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      onClick={() => onOpenChange(false)}
+    >
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+
+      {/* Card — stop propagation so clicks inside don't dismiss */}
+      <div
+        className="relative z-10 bg-background rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
+          <span className="text-sm font-semibold">{title ?? t("events.snapshot")}</span>
+          <button
+            onClick={() => onOpenChange(false)}
+            className="rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Image */}
+        <div className="bg-muted flex items-center justify-center min-h-[280px] max-h-[70vh] overflow-hidden">
+          {resolvedSrc ? (
+            <img
+              src={resolvedSrc}
+              alt={title ?? "snapshot"}
+              className="max-h-[70vh] max-w-full object-contain"
+            />
           ) : (
             <span className="text-muted-foreground text-sm">{t("common.noData")}</span>
           )}
         </div>
-        {src && (
-          <div className="flex justify-end">
-            <a href={src} download>
+
+        {/* Footer */}
+        {resolvedSrc && (
+          <div className="flex justify-end px-4 py-3 border-t shrink-0">
+            <a href={resolvedSrc} download target="_blank" rel="noopener noreferrer">
               <Button variant="outline" size="sm">
-                <Download className="h-4 w-4 mr-2" /> {t("common.download")}
+                <Download className="h-4 w-4 mr-2" />
+                {t("common.download")}
               </Button>
             </a>
           </div>
         )}
-      </DialogContent>
-    </Dialog>
+      </div>
+    </div>,
+    document.body,
   );
 }

@@ -132,6 +132,7 @@ function EventsPage() {
         until: appliedFilters.until,
       }),
     retry: false,
+    staleTime: 5_000,
   });
 
   const countQ = useQuery({
@@ -148,6 +149,7 @@ function EventsPage() {
         until: appliedFilters.until,
       }),
     retry: false,
+    staleTime: 5_000,
   });
 
   const totalCount  = countQ.data ?? 0;

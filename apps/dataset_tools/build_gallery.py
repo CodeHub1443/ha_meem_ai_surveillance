@@ -78,12 +78,12 @@ def main() -> set:
 
     if not aligned_dir.exists():
         print(f"Error: '{aligned_dir}' does not exist.  Run extract_faces.py first.")
-        return
+        return set()
 
     model_path = config.get("models", {}).get("adaface_onnx")
     if not model_path or not os.path.exists(model_path):
         print(f"Error: AdaFace model not found at '{model_path}'")
-        return
+        return set()
 
     print("Initializing AdaFace Recognizer…")
     recognizer = AdaFaceRecognizer(config, model_path)

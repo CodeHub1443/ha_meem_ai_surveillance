@@ -1,5 +1,4 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { format } from "date-fns";
@@ -11,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { EventBadge } from "@/components/shared/EventBadge";
 import { fetchLatestEvents, fetchStatsSummary } from "@/api/events";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
+import { useToday } from "@/hooks/useToday";
 import { useCameraList } from "@/context/SettingsContext";
 import { AlertTriangle, Camera as CameraIcon, ShieldCheck, Bell } from "lucide-react";
 
@@ -22,23 +22,21 @@ function DashboardPage() {
   const cameras = useCameraList();
   const { isOnline } = useHealthCheck();
 
-  const todayISO = useMemo(() => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d.toISOString();
-  }, []);
+  const today = useToday(); // re-triggers at midnight — never stale past 00:00
 
   const todayStats = useQuery({
-    queryKey: ["stats", "today", todayISO],
-    queryFn: () => fetchStatsSummary({ since: todayISO }),
-    refetchInterval: 30000,
+    queryKey: ["stats", "today", today],
+    queryFn: () => fetchStatsSummary({ since: `${today}T00:00:00.000Z` }),
+    refetchInterval: 30_000,
+    staleTime: 30_000,
     retry: false,
   });
 
   const latest = useQuery({
     queryKey: ["events", "latest", 10],
     queryFn: () => fetchLatestEvents({ limit: 10 }),
-    refetchInterval: 15000,
+    refetchInterval: 15_000,
+    staleTime: 15_000,
     retry: false,
   });
 

@@ -3,7 +3,9 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +18,7 @@ import numpy as np
 import yaml
 
 from core import frame_buffer as _fb
+from core import io_worker as _io_worker
 from core.clustering import run_clustering
 from core.database.event_store import EventStore
 from core.database.person_store import PersonStore
@@ -95,7 +98,10 @@ def _load_cameras() -> List[Dict]:
 
 
 def _capture_frame(rtsp_url: str):
-    cap = cv2.VideoCapture(rtsp_url)
+    cap = cv2.VideoCapture()
+    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8_000)
+    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5_000)
+    cap.open(rtsp_url)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     for _ in range(4):
         cap.grab()
@@ -106,9 +112,18 @@ def _capture_frame(rtsp_url: str):
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
 
+_CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080",
+    ).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -162,10 +177,11 @@ def _tail_log_file():
                                 event = json.loads(line)
                                 if _event_loop and not _event_loop.is_closed():
                                     with _sse_lock:
-                                        for q in list(_sse_subscribers):
-                                            _event_loop.call_soon_threadsafe(
-                                                _sse_put_nowait, q, event
-                                            )
+                                        snapshot = list(_sse_subscribers)
+                                    for q in snapshot:
+                                        _event_loop.call_soon_threadsafe(
+                                            _sse_put_nowait, q, event
+                                        )
                             except json.JSONDecodeError:
                                 pass
                     last_size = size
@@ -173,7 +189,9 @@ def _tail_log_file():
                     last_size = 0
         except Exception as e:
             log.error("Log tail error: %s", e)
-        time.sleep(0.1)
+        with _sse_lock:
+            has_subs = bool(_sse_subscribers)
+        time.sleep(0.1 if has_subs else 2.0)
 
 
 # ── Startup ────────────────────────────────────────────────────────────────────
@@ -245,7 +263,21 @@ def root():
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "total_events": _event_store.count()}
+    cam_liveness = []
+    for cam in _load_cameras():
+        cid = cam.get("id")
+        age = _fb.age(cid)
+        cam_liveness.append({
+            "id": cid,
+            "active": age is not None and age < _fb.STALE_SECS,
+            "age_seconds": round(age, 2) if age is not None else None,
+        })
+    return {
+        "status": "ok",
+        "total_events": _event_store.count(),
+        "dropped_events": _io_worker.get_dropped_count(),
+        "cameras": cam_liveness,
+    }
 
 
 # ── Events ─────────────────────────────────────────────────────────────────────
@@ -410,6 +442,21 @@ def get_stats_summary(
 # ── Clustering ─────────────────────────────────────────────────────────────────
 
 _clustering_lock = threading.Lock()
+_clustering_state: dict = {"status": "idle", "result": None, "error": None}
+
+
+def _run_clustering_bg(min_cluster_size: int, distance_threshold: float) -> None:
+    global _clustering_state
+    try:
+        result = run_clustering(
+            min_cluster_size=min_cluster_size,
+            distance_threshold=distance_threshold,
+        )
+        _clustering_state = {"status": "done", "result": result, "error": None}
+    except Exception as exc:
+        _clustering_state = {"status": "error", "result": None, "error": str(exc)}
+    finally:
+        _clustering_lock.release()
 
 
 @app.get("/cluster/unknowns/groups")
@@ -417,23 +464,28 @@ def get_cluster_groups(max_snapshots: int = Query(default=4, ge=1, le=10)):
     return _event_store.get_cluster_groups(max_snapshots=max_snapshots)
 
 
+@app.get("/cluster/unknowns/status")
+def get_clustering_status():
+    return _clustering_state
+
+
 @app.post("/cluster/unknowns")
 def trigger_clustering(
     min_cluster_size: int = Query(default=2, ge=2, le=50),
     distance_threshold: float = Query(default=0.45, ge=0.1, le=1.0),
 ):
+    global _clustering_state
     if not _clustering_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Clustering already in progress")
-    try:
-        result = run_clustering(
-            min_cluster_size=min_cluster_size,
-            distance_threshold=distance_threshold,
-        )
-        return {"status": "ok", **result}
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        _clustering_lock.release()
+    _clustering_state = {"status": "running", "result": None, "error": None}
+    t = threading.Thread(
+        target=_run_clustering_bg,
+        args=(min_cluster_size, distance_threshold),
+        daemon=True,
+        name="clustering",
+    )
+    t.start()
+    return {"status": "started"}
 
 
 # ── SSE ────────────────────────────────────────────────────────────────────────
@@ -486,10 +538,11 @@ def _enrich_persons(persons: List[Dict]) -> List[PersonOut]:
 
     result = []
     for p in persons:
+        pid = p["id"]
         name = p["name"]
-        s = stats.get(name, {})
+        s = stats.get(pid, {})
         avg_score = s.get("avg_score")
-        embeddings = gallery.get(name, [])
+        embeddings = gallery.get(pid, [])
         thumbnail = p.get("thumbnail_url") or s.get("latest_snapshot")
         result.append(PersonOut(
             id=p["id"],
@@ -528,7 +581,7 @@ def create_person(
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
 
-    person_id = name.lower().replace(" ", "_")
+    person_id = re.sub(r"[^a-z0-9_]", "_", name.lower().replace(" ", "_")).strip("_") or "person"
     if _person_store.exists(person_id):
         raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
 
@@ -555,11 +608,8 @@ def create_person(
             working_area=working_area or None,
             thumbnail_url=thumbnail_url,
         )
-    except Exception as exc:
-        import sqlite3
-        if isinstance(exc, sqlite3.IntegrityError):
-            raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
-        raise
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
 
     p = _person_store.get(person_id)
     return _enrich_persons([p])[0]
@@ -568,14 +618,14 @@ def create_person(
 @app.patch("/persons/{person_id}", response_model=PersonOut)
 def update_person(person_id: str, body: PersonUpdate):
     """Update employee metadata for a person."""
-    if not _person_store.exists(person_id):
-        raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
-    _person_store.update(
+    found = _person_store.update(
         person_id,
         employee_id=body.employee_id,
         designation=body.designation,
         working_area=body.working_area,
     )
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
     p = _person_store.get(person_id)
     return _enrich_persons([p])[0]
 
@@ -583,10 +633,9 @@ def update_person(person_id: str, body: PersonUpdate):
 @app.delete("/persons/{person_id}", status_code=204)
 def delete_person(person_id: str):
     """Delete a person record and their aligned face images."""
-    if not _person_store.exists(person_id):
+    found = _person_store.delete(person_id)
+    if not found:
         raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
-    _person_store.delete(person_id)
-    # Remove aligned face crops from disk
     person_dir = Path(ALIGNED_FACES_DIR) / person_id
     if person_dir.exists():
         shutil.rmtree(person_dir, ignore_errors=True)
@@ -603,6 +652,8 @@ def get_person(person_id: str):
 @app.get("/persons/{person_id}/samples")
 def get_person_samples(person_id: str):
     """Return URLs for all aligned face crop images stored for a person."""
+    if not _person_store.get(person_id):
+        raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
     person_dir = Path(ALIGNED_FACES_DIR) / person_id
     if not person_dir.exists():
         return {"urls": []}

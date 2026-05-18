@@ -33,8 +33,12 @@ function SettingsPage() {
 
   const save = async () => {
     setSettings(draft);
-    try { await saveSettings(draft); } catch { /* ignore */ }
-    toast.success(t("common.saved"));
+    try {
+      await saveSettings(draft);
+      toast.success(t("common.saved"));
+    } catch {
+      toast.warning(t("settings.savedLocalOnly"));
+    }
   };
 
   return (
@@ -95,7 +99,10 @@ function CamerasTab({ draft, setDraft }: { draft: AppSettings; setDraft: (s: App
 
   const addCamera = () => {
     if (draft.cameras.length >= 8) { toast.warning(t("settings.maxCameras")); return; }
-    const id = `camera_${String(draft.cameras.length + 1).padStart(2, "0")}`;
+    const existing = new Set(draft.cameras.map((c) => c.id));
+    let n = 1;
+    while (existing.has(`camera_${String(n).padStart(2, "0")}`)) n++;
+    const id = `camera_${String(n).padStart(2, "0")}`;
     setDraft({
       ...draft,
       cameras: [...draft.cameras, { id, name: "New Camera", rtsp_url: "", roi: { x1: 0, y1: 0, x2: 1920, y2: 1080 }, active: true }],
@@ -135,8 +142,15 @@ function CamerasTab({ draft, setDraft }: { draft: AppSettings; setDraft: (s: App
                   <Input
                     value={c.id} disabled={!isUnlocked}
                     onChange={(e) => {
+                      const oldId = c.id;
                       const newId = e.target.value;
-                      setDraft({ ...draft, cameras: draft.cameras.map((x) => x.id === c.id ? { ...x, id: newId } : x) });
+                      setDraft({ ...draft, cameras: draft.cameras.map((x) => x.id === oldId ? { ...x, id: newId } : x) });
+                      setUnlocked((u) => {
+                        const next = { ...u };
+                        next[newId] = next[oldId];
+                        delete next[oldId];
+                        return next;
+                      });
                     }}
                   />
                   <Button type="button" size="icon" variant="outline" onClick={() => setUnlocked((u) => ({ ...u, [c.id]: !u[c.id] }))}>
@@ -400,8 +414,8 @@ function WhatsAppTab({ draft, setDraft }: { draft: AppSettings; setDraft: (s: Ap
 
       <div className="pt-4 border-t flex items-center gap-3">
         <Button onClick={sendTest} disabled={!configured || testing}>{t("settings.wa.sendTest")}</Button>
-        {testResult === "ok" && <span className="text-xs text-success">✓ Sent</span>}
-        {testResult === "err" && <span className="text-xs text-danger">✗ Failed</span>}
+        {testResult === "ok" && <span className="text-xs text-success">{t("settings.wa.sent")}</span>}
+        {testResult === "err" && <span className="text-xs text-danger">{t("settings.wa.failed")}</span>}
       </div>
     </Card>
   );

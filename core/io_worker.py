@@ -8,6 +8,17 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# Module-level counter so the API server can expose it without holding a reference
+# to a specific AsyncIOWorker instance.
+_dropped_lock = threading.Lock()
+_dropped_events: int = 0
+
+
+def get_dropped_count() -> int:
+    """Return the total number of events dropped due to a full I/O queue."""
+    with _dropped_lock:
+        return _dropped_events
+
 
 class AsyncIOWorker:
     """Handles snapshot saving and event logging in a background thread.
@@ -46,7 +57,10 @@ class AsyncIOWorker:
         try:
             self._queue.put_nowait((frame.copy(), event_data.copy(), identity, timestamp, emb_copy))
         except queue.Full:
-            log.warning("AsyncIOWorker queue full — event dropped")
+            global _dropped_events
+            with _dropped_lock:
+                _dropped_events += 1
+            log.warning("AsyncIOWorker queue full — event dropped (total dropped: %d)", _dropped_events)
 
     def _worker(self):
         while True:

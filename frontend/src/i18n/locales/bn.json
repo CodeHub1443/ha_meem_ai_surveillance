@@ -136,7 +136,11 @@
     "designation": "পদবি",
     "workingArea": "কর্মক্ষেত্র",
     "facePhotos": "মুখের ছবি",
-    "pending": "অপেক্ষমান"
+    "pending": "অপেক্ষমান",
+    "building": "গ্যালারি তৈরি হচ্ছে…",
+    "uploadTypes": "JPG, PNG · একাধিক অনুমোদিত",
+    "filesSelected": "{{n}}টি ফাইল নির্বাচিত",
+    "avg": "গড়:"
   },
   "reports": {
     "title": "রিপোর্ট",
@@ -174,6 +178,7 @@
       "whatsapp": "হোয়াটসঅ্যাপ",
       "system": "সিস্টেম"
     },
+    "savedLocalOnly": "স্থানীয়ভাবে সংরক্ষিত (ব্যাকএন্ড অনুপলব্ধ)",
     "addCamera": "ক্যামেরা যোগ করুন",
     "cameraName": "ক্যামেরার নাম",
     "cameraId": "ক্যামেরা আইডি",
@@ -224,6 +229,8 @@
       "includeSnap": "স্ন্যাপশট ছবি অন্তর্ভুক্ত",
       "includeSnapHint": "হোয়াটসঅ্যাপ বার্তায় মুখের স্ন্যাপশট সংযুক্ত করুন",
       "sendTest": "পরীক্ষামূলক বার্তা পাঠান",
+      "sent": "✓ পাঠানো হয়েছে",
+      "failed": "✗ ব্যর্থ",
       "configured": "কনফিগারড",
       "notConfigured": "কনফিগার করা হয়নি"
     },
@@ -265,6 +272,7 @@
     "rawHealth": "কাঁচা /health প্রতিক্রিয়া",
     "clustering": "অজানা ক্লাস্টারিং বিশ্লেষণ",
     "runClustering": "ক্লাস্টারিং চালান",
+    "clusteringRunning": "চলছে…",
     "refresh": "রিফ্রেশ",
     "minClusterSize": "ন্যূনতম ক্লাস্টার আকার",
     "distanceThreshold": "দূরত্ব থ্রেশহোল্ড",
@@ -284,6 +292,9 @@
     "last": "শেষ",
     "clusterHeader": "ক্লাস্টার ({{n}})",
     "singletonsHeader": "একক ({{n}})",
-    "clusteringComplete": "ক্লাস্টারিং সম্পন্ন · {{clusters}} ক্লাস্টার, {{noise}} একক"
+    "clusteringComplete": "ক্লাস্টারিং সম্পন্ন · {{clusters}} ক্লাস্টার, {{noise}} একক",
+    "logEvents": "ঘটনা",
+    "logBot": "বট",
+    "logSystem": "সিস্টেম"
   }
 }

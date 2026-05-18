@@ -136,7 +136,11 @@
     "designation": "Designation",
     "workingArea": "Working Area",
     "facePhotos": "Face Photos",
-    "pending": "Pending"
+    "pending": "Pending",
+    "building": "Building gallery…",
+    "uploadTypes": "JPG, PNG · multiple allowed",
+    "filesSelected": "{{n}} file(s) selected",
+    "avg": "Avg:"
   },
   "reports": {
     "title": "Reports",
@@ -174,6 +178,7 @@
       "whatsapp": "WhatsApp",
       "system": "System"
     },
+    "savedLocalOnly": "Saved locally (backend unreachable)",
     "addCamera": "Add Camera",
     "cameraName": "Camera Name",
     "cameraId": "Camera ID",
@@ -224,6 +229,8 @@
       "includeSnap": "Include Snapshot Image",
       "includeSnapHint": "Attach face snapshot image to WhatsApp message",
       "sendTest": "Send Test Alert",
+      "sent": "✓ Sent",
+      "failed": "✗ Failed",
       "configured": "Configured",
       "notConfigured": "Not Configured"
     },
@@ -265,6 +272,7 @@
     "rawHealth": "Raw /health response",
     "clustering": "Unknown Clustering Analysis",
     "runClustering": "Run Clustering",
+    "clusteringRunning": "Running…",
     "refresh": "Refresh",
     "minClusterSize": "Min Cluster Size",
     "distanceThreshold": "Distance Threshold",
@@ -284,6 +292,9 @@
     "last": "Last",
     "clusterHeader": "Clusters ({{n}})",
     "singletonsHeader": "Singletons ({{n}})",
-    "clusteringComplete": "Clustering complete · {{clusters}} cluster(s), {{noise}} singleton(s)"
+    "clusteringComplete": "Clustering complete · {{clusters}} cluster(s), {{noise}} singleton(s)",
+    "logEvents": "Events",
+    "logBot": "Bot",
+    "logSystem": "System"
   }
 }

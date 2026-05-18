@@ -38,6 +38,7 @@ def run_clustering(
     db_path: Optional[str] = None,
     min_cluster_size: int = 2,
     distance_threshold: float = 0.45,
+    max_tracks: int = 5000,
 ) -> Dict:
     """Run the full clustering pipeline. Returns a result summary dict.
 
@@ -96,6 +97,16 @@ def run_clustering(
     log.info(
         "Track representatives: %d (from %d raw embeddings).", n_tracks, n_embeddings
     )
+
+    if n_tracks > max_tracks:
+        log.warning(
+            "Capping clustering input from %d to %d tracks (max_tracks=%d). "
+            "Oldest tracks are dropped — run clustering more frequently to avoid this.",
+            n_tracks, max_tracks, max_tracks,
+        )
+        track_ids = track_ids[:max_tracks]
+        track_reps = track_reps[:max_tracks]
+        n_tracks = max_tracks
 
     # ── Clustering ───────────────────────────────────────────────────────────
     rep_matrix = np.stack(track_reps).astype(np.float64)  # (n_tracks, 512)

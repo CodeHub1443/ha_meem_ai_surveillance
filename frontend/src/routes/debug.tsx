@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { format } from "date-fns";
@@ -12,10 +12,12 @@ import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TerminalLog } from "@/components/shared/TerminalLog";
-import { fetchHealth, SSE_EVENTS_URL, fetchStatsSummary, fetchClusterGroups, triggerClustering, snapshotUrl } from "@/api/events";
-import type { ClusterGroup, ClusterSingleton } from "@/api/events";
+import { fetchHealth, fetchStatsSummary, fetchClusterGroups, triggerClustering, fetchClusteringStatus, snapshotUrl } from "@/api/events";
+import { SnapshotModal } from "@/components/shared/SnapshotModal";
+import type { ClusterGroup, ClusterSingleton, ClusteringResult } from "@/api/events";
 import { fetchPipelineStatus, fetchPipelineStats, fetchSseSubscribers, fetchLogs, fetchGalleryInfo } from "@/api/stubs";
-import { useSSEStream } from "@/hooks/useSSEStream";
+import { useSSEEvent } from "@/context/SSEContext";
+import type { SurveillanceEvent } from "@/types/surveillance";
 import { Activity, Bell, Server, Users, GitMerge, Loader2, RefreshCw, User } from "lucide-react";
 
 export const Route = createFileRoute("/debug")({ component: DebugPage });
@@ -23,9 +25,9 @@ export const Route = createFileRoute("/debug")({ component: DebugPage });
 function DebugPage() {
   const { t } = useTranslation();
 
-  const health = useQuery({ queryKey: ["health-debug"], queryFn: fetchHealth, refetchInterval: 10000, retry: false });
-  const pstatus = useQuery({ queryKey: ["pipeline-status"], queryFn: fetchPipelineStatus, refetchInterval: 10000 });
-  const subs = useQuery({ queryKey: ["sse-subs"], queryFn: fetchSseSubscribers, refetchInterval: 10000 });
+  const health = useQuery({ queryKey: ["health-debug"], queryFn: fetchHealth, refetchInterval: 10_000, staleTime: 10_000, retry: false });
+  const pstatus = useQuery({ queryKey: ["pipeline-status"], queryFn: fetchPipelineStatus, refetchInterval: 10_000, staleTime: 10_000 });
+  const subs = useQuery({ queryKey: ["sse-subs"], queryFn: fetchSseSubscribers, refetchInterval: 10_000, staleTime: 10_000 });
 
   return (
     <AppShell title={t("debug.title")}>
@@ -65,30 +67,36 @@ function DebugStat({ icon, label, value, tone }: { icon: React.ReactNode; label:
 
 function SseStreamPanel() {
   const { t } = useTranslation();
-  const [enabled, setEnabled] = useState(true);
   const [paused, setPaused] = useState(false);
-  const sse = useSSEStream(SSE_EVENTS_URL, enabled);
+  const [events, setEvents] = useState<SurveillanceEvent[]>([]);
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+
+  // Consume the single global SSE connection — opening a second EventSource
+  // here would cause every event to be sent twice from the backend.
+  useSSEEvent(useCallback((e: SurveillanceEvent) => {
+    if (!pausedRef.current) {
+      setEvents((prev) => [e, ...prev].slice(0, 100));
+    }
+  }, []));
 
   const lines = useMemo(
-    () => sse.events.map((e) => `[${new Date(e.timestamp).toISOString()}] ${JSON.stringify(e)}`),
-    [sse.events]
+    () => events.map((e) => `[${new Date(e.timestamp).toISOString()}] ${JSON.stringify(e)}`),
+    [events],
   );
 
   return (
     <Card className="p-4">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold">{t("debug.sseStream")}</h2>
-        <span className="text-xs">
-          {sse.status === "connected" ? <span className="text-success">● {t("common.connected")}</span> : <span className="text-muted-foreground">○ {t("common.disconnected")}</span>}
-        </span>
+        <span className="text-xs text-success">● {t("common.connected")}</span>
       </div>
       <TerminalLog lines={lines} autoScroll={!paused} height={320} />
       <div className="flex gap-2 mt-3">
-        <Button size="sm" variant="outline" onClick={() => setEnabled((v) => !v)}>
-          {enabled ? t("debug.disconnect") : t("debug.connect")}
+        <Button size="sm" variant="outline" onClick={() => setPaused((p) => !p)}>
+          {paused ? t("debug.resume") : t("debug.pause")}
         </Button>
-        <Button size="sm" variant="outline" onClick={() => setPaused((p) => !p)}>{paused ? t("debug.resume") : t("debug.pause")}</Button>
-        <Button size="sm" variant="outline" onClick={sse.clear}>{t("debug.clear")}</Button>
+        <Button size="sm" variant="outline" onClick={() => setEvents([])}>{t("debug.clear")}</Button>
       </div>
     </Card>
   );
@@ -172,9 +180,9 @@ function LogViewer() {
       </div>
       <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
         <TabsList>
-          <TabsTrigger value="events">Events</TabsTrigger>
-          <TabsTrigger value="bot">Bot</TabsTrigger>
-          <TabsTrigger value="system">System</TabsTrigger>
+          <TabsTrigger value="events">{t("debug.logEvents")}</TabsTrigger>
+          <TabsTrigger value="bot">{t("debug.logBot")}</TabsTrigger>
+          <TabsTrigger value="system">{t("debug.logSystem")}</TabsTrigger>
         </TabsList>
         <TabsContent value={tab} className="mt-3">
           <TerminalLog lines={logs.data?.lines || []} showLineNumbers height={260} />
@@ -223,25 +231,45 @@ function ClusteringAnalysis() {
   const qc = useQueryClient();
   const [minSize, setMinSize] = useState(2);
   const [threshold, setThreshold] = useState(0.45);
-  const [lastResult, setLastResult] = useState<{
-    n_clusters: number; n_noise: number; n_embeddings: number; n_tracks: number; unique_unauthorized: number;
-  } | null>(null);
+  const [polling, setPolling] = useState(false);
+  const [lastResult, setLastResult] = useState<ClusteringResult | null>(null);
+  const [zoomImg, setZoomImg] = useState<string | null>(null);
 
-  const stats = useQuery({ queryKey: ["stats-summary-debug"], queryFn: () => fetchStatsSummary(), refetchInterval: 30000 });
-  const groups = useQuery({ queryKey: ["cluster-groups"], queryFn: () => fetchClusterGroups(4) });
+  const stats = useQuery({ queryKey: ["stats-summary-debug"], queryFn: () => fetchStatsSummary(), refetchInterval: 30_000, staleTime: 30_000 });
+  const groups = useQuery({ queryKey: ["cluster-groups"], queryFn: () => fetchClusterGroups(4), staleTime: 60_000 });
 
   const { t } = useTranslation();
 
-  const clusterMut = useMutation({
-    mutationFn: () => triggerClustering(minSize, threshold),
-    onSuccess: (data) => {
-      setLastResult(data);
-      toast.success(t("debug.clusteringComplete", { clusters: data.n_clusters, noise: data.n_noise }));
+  // Poll /cluster/unknowns/status while a run is in progress.
+  const statusQ = useQuery({
+    queryKey: ["clustering-status"],
+    queryFn: fetchClusteringStatus,
+    refetchInterval: polling ? 1500 : false,
+    enabled: polling,
+  });
+
+  useEffect(() => {
+    if (!statusQ.data) return;
+    const { status, result, error } = statusQ.data;
+    if (status === "done" && result) {
+      setPolling(false);
+      setLastResult(result);
+      toast.success(t("debug.clusteringComplete", { clusters: result.n_clusters, noise: result.n_noise }));
       void qc.invalidateQueries({ queryKey: ["cluster-groups"] });
       void qc.invalidateQueries({ queryKey: ["stats-summary-debug"] });
-    },
+    } else if (status === "error") {
+      setPolling(false);
+      toast.error(error ?? "Clustering failed");
+    }
+  }, [statusQ.data, qc, t]);
+
+  const clusterMut = useMutation({
+    mutationFn: () => triggerClustering(minSize, threshold),
+    onSuccess: () => setPolling(true),
     onError: (e) => toast.error(String(e)),
   });
+
+  const isRunning = clusterMut.isPending || polling;
 
   const s = stats.data;
 
@@ -303,9 +331,9 @@ function ClusteringAnalysis() {
       </div>
 
       <div className="flex items-center gap-3 mb-5">
-        <Button onClick={() => clusterMut.mutate()} disabled={clusterMut.isPending} size="sm">
-          {clusterMut.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <GitMerge className="h-3.5 w-3.5 mr-1.5" />}
-          {t("debug.runClustering")}
+        <Button onClick={() => clusterMut.mutate()} disabled={isRunning} size="sm">
+          {isRunning ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <GitMerge className="h-3.5 w-3.5 mr-1.5" />}
+          {isRunning ? t("debug.clusteringRunning") : t("debug.runClustering")}
         </Button>
         <Button variant="outline" size="sm" onClick={() => { void groups.refetch(); void stats.refetch(); }}>
           <RefreshCw className="h-3.5 w-3.5 mr-1.5" />{t("debug.refresh")}
@@ -340,7 +368,7 @@ function ClusteringAnalysis() {
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {groups.data!.clusters.map((c) => (
-                  <ClusterCard key={c.cluster_id} cluster={c} />
+                  <ClusterCard key={c.cluster_id} cluster={c} onZoom={setZoomImg} />
                 ))}
               </div>
             </div>
@@ -352,18 +380,20 @@ function ClusteringAnalysis() {
               </h3>
               <div className="flex flex-wrap gap-3">
                 {groups.data!.singletons.map((s) => (
-                  <SingletonCard key={s.track_id} singleton={s} />
+                  <SingletonCard key={s.track_id} singleton={s} onZoom={setZoomImg} />
                 ))}
               </div>
             </div>
           )}
         </div>
       )}
+
+      <SnapshotModal open={!!zoomImg} onOpenChange={(o) => !o && setZoomImg(null)} src={zoomImg} />
     </Card>
   );
 }
 
-function ClusterCard({ cluster }: { cluster: ClusterGroup }) {
+function ClusterCard({ cluster, onZoom }: { cluster: ClusterGroup; onZoom: (url: string) => void }) {
   const { t } = useTranslation();
   const imgs = cluster.snapshots.filter(Boolean);
   return (
@@ -374,13 +404,18 @@ function ClusterCard({ cluster }: { cluster: ClusterGroup }) {
       </div>
       <div className="flex gap-1.5 flex-wrap">
         {imgs.length ? imgs.map((url, i) => (
-          <img
+          <button
             key={i}
-            src={snapshotUrl(url) ?? url}
-            alt={`Cluster ${cluster.cluster_id} snap ${i + 1}`}
-            className="h-14 w-14 rounded object-cover border"
-            loading="lazy"
-          />
+            className="h-14 w-14 rounded overflow-hidden border hover:ring-2 hover:ring-primary transition-all shrink-0"
+            onClick={() => onZoom(url)}
+          >
+            <img
+              src={snapshotUrl(url) ?? url}
+              alt={`Cluster ${cluster.cluster_id} snap ${i + 1}`}
+              className="h-full w-full object-cover"
+              loading="lazy"
+            />
+          </button>
         )) : (
           <div className="h-14 w-14 rounded bg-muted flex items-center justify-center">
             <User className="h-5 w-5 text-muted-foreground/40" />
@@ -396,12 +431,17 @@ function ClusterCard({ cluster }: { cluster: ClusterGroup }) {
   );
 }
 
-function SingletonCard({ singleton }: { singleton: ClusterSingleton }) {
+function SingletonCard({ singleton, onZoom }: { singleton: ClusterSingleton; onZoom: (url: string) => void }) {
   const imgUrl = snapshotUrl(singleton.snapshot);
   return (
     <div className="border rounded-md p-2 bg-muted/20 flex flex-col items-center gap-1.5 w-[80px]">
       {imgUrl ? (
-        <img src={imgUrl} alt={`Track ${singleton.track_id}`} className="h-12 w-12 rounded object-cover border" />
+        <button
+          className="h-12 w-12 rounded overflow-hidden border hover:ring-2 hover:ring-primary transition-all"
+          onClick={() => onZoom(singleton.snapshot!)}
+        >
+          <img src={imgUrl} alt={`Track ${singleton.track_id}`} className="h-full w-full object-cover" />
+        </button>
       ) : (
         <div className="h-12 w-12 rounded bg-muted flex items-center justify-center">
           <User className="h-4 w-4 text-muted-foreground/40" />

@@ -310,10 +310,10 @@ class CameraWorker:
             )
 
             if upgradeable:
-                if identity is None or score < self.similarity_threshold:
+                if identity is None or score < self.similarity_threshold + self.upgrade_margin:
                     log.debug(
                         f"[{self.camera_id}] UPGRADE skipped track={face.track_id}: "
-                        f"score={score:.4f} below threshold={self.similarity_threshold}"
+                        f"score={score:.4f} below threshold={self.similarity_threshold + self.upgrade_margin:.4f}"
                     )
                     continue
                 log.info(

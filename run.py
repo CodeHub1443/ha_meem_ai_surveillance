@@ -9,6 +9,7 @@ Usage:
 """
 import logging
 import threading
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +27,17 @@ def _run_pipeline():
         log.exception("Pipeline crashed")
 
 
+def _watchdog(pipeline_thread: threading.Thread, interval: float = 60.0) -> None:
+    """Log a CRITICAL alert every `interval` seconds while the pipeline is dead."""
+    while True:
+        time.sleep(interval)
+        if not pipeline_thread.is_alive():
+            log.critical(
+                "WATCHDOG: pipeline thread has died — "
+                "face recognition is offline. Restart the process to recover."
+            )
+
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -33,6 +45,10 @@ if __name__ == "__main__":
     t = threading.Thread(target=_run_pipeline, daemon=True, name="pipeline")
     t.start()
     log.info("Pipeline thread started")
+
+    # Watchdog: logs CRITICAL if the pipeline thread dies unexpectedly.
+    wd = threading.Thread(target=_watchdog, args=(t,), daemon=True, name="watchdog")
+    wd.start()
 
     # Run the API server in the main thread.
     uvicorn.run(

@@ -19,6 +19,7 @@ import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import {
   fetchPersons, createPerson, deletePerson, fetchPersonSamples, buildGallery, fetchBuildStatus,
 } from "@/api/persons";
+import { SnapshotModal } from "@/components/shared/SnapshotModal";
 import { API_BASE_URL } from "@/api/config";
 import { Hammer, Trash2, UserPlus, Users, Upload, Images, ShieldCheck, Loader2 } from "lucide-react";
 import type { Person } from "@/types/surveillance";
@@ -36,9 +37,10 @@ function GalleryPage() {
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState(0);
   const [lastBuilt, setLastBuilt] = useState<string | null>(null);
+  const [zoomImg, setZoomImg] = useState<string | null>(null);
 
-  const pendingQ  = useQuery({ queryKey: ["persons", "pending"],  queryFn: () => fetchPersons("pending") });
-  const enrolledQ = useQuery({ queryKey: ["persons", "enrolled"], queryFn: () => fetchPersons("enrolled") });
+  const pendingQ  = useQuery({ queryKey: ["persons", "pending"],  queryFn: () => fetchPersons("pending"),  staleTime: 60_000 });
+  const enrolledQ = useQuery({ queryKey: ["persons", "enrolled"], queryFn: () => fetchPersons("enrolled"), staleTime: 60_000 });
 
   const delMut = useMutation({
     mutationFn: deletePerson,
@@ -112,7 +114,7 @@ function GalleryPage() {
         <Card className="p-4 mb-4">
           <div className="flex items-center gap-2 mb-2">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0" />
-            <span className="text-sm font-medium">Building gallery…</span>
+            <span className="text-sm font-medium">{t("gallery.building")}</span>
           </div>
           <Progress value={progress} />
           <p className="text-[11px] text-muted-foreground mt-2">{t("gallery.buildStepsHint")}</p>
@@ -145,7 +147,7 @@ function GalleryPage() {
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
               {pending.map((p) => (
-                <PersonCard key={p.id} person={p} onViewSamples={() => setSamplesFor(p)} onDelete={() => setConfirmDel(p.id)} />
+                <PersonCard key={p.id} person={p} onViewSamples={() => setSamplesFor(p)} onDelete={() => setConfirmDel(p.id)} onZoom={setZoomImg} />
               ))}
             </div>
           )}
@@ -163,7 +165,7 @@ function GalleryPage() {
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
               {enrolled.map((p) => (
-                <PersonCard key={p.id} person={p} onViewSamples={() => setSamplesFor(p)} onDelete={() => setConfirmDel(p.id)} enrolled />
+                <PersonCard key={p.id} person={p} onViewSamples={() => setSamplesFor(p)} onDelete={() => setConfirmDel(p.id)} onZoom={setZoomImg} enrolled />
               ))}
             </div>
           )}
@@ -173,7 +175,8 @@ function GalleryPage() {
       {/* Dialogs */}
       <AddPersonDialog open={addOpen} onOpenChange={setAddOpen} />
 
-      <ViewSamplesDialog person={samplesFor} open={!!samplesFor} onOpenChange={(o) => !o && setSamplesFor(null)} />
+      <ViewSamplesDialog person={samplesFor} open={!!samplesFor} onOpenChange={(o) => !o && setSamplesFor(null)} onZoom={setZoomImg} />
+      <SnapshotModal open={!!zoomImg} onOpenChange={(o) => !o && setZoomImg(null)} src={zoomImg} />
 
       <ConfirmDialog
         open={buildOpen} onOpenChange={setBuildOpen}
@@ -191,8 +194,8 @@ function GalleryPage() {
 }
 
 /* ── Person card ── */
-function PersonCard({ person, onViewSamples, onDelete, enrolled = false }: {
-  person: Person; onViewSamples: () => void; onDelete: () => void; enrolled?: boolean;
+function PersonCard({ person, onViewSamples, onDelete, onZoom, enrolled = false }: {
+  person: Person; onViewSamples: () => void; onDelete: () => void; onZoom: (url: string) => void; enrolled?: boolean;
 }) {
   const { t } = useTranslation();
   const thumbSrc = person.thumbnail_url
@@ -202,7 +205,13 @@ function PersonCard({ person, onViewSamples, onDelete, enrolled = false }: {
   return (
     <Card className="p-5 text-center">
       {thumbSrc ? (
-        <img src={thumbSrc} className="h-20 w-20 rounded-full object-cover mx-auto mb-3 border-2 border-border" alt={person.name} />
+        <button
+          className="h-20 w-20 rounded-full overflow-hidden mx-auto mb-3 border-2 border-border block hover:ring-2 hover:ring-primary transition-all"
+          onClick={() => onZoom(person.thumbnail_url!)}
+          aria-label={t("gallery.viewSamples")}
+        >
+          <img src={thumbSrc} className="h-full w-full object-cover" alt={person.name} />
+        </button>
       ) : (
         <div className="h-20 w-20 rounded-full bg-primary/10 mx-auto mb-3 flex items-center justify-center text-lg font-semibold text-primary border-2 border-border">
           {person.name.split(" ").map((s) => s[0]).join("").slice(0, 2).toUpperCase()}
@@ -220,7 +229,7 @@ function PersonCard({ person, onViewSamples, onDelete, enrolled = false }: {
       )}
       <p className="text-xs text-muted-foreground mt-1">{person.sample_count} {t("gallery.samples")}</p>
       {person.avg_accuracy != null && (
-        <p className="text-xs text-muted-foreground">Avg: <span className="font-medium text-foreground">{person.avg_accuracy}%</span></p>
+        <p className="text-xs text-muted-foreground">{t("gallery.avg")} <span className="font-medium text-foreground">{person.avg_accuracy}%</span></p>
       )}
       {enrolled ? (
         <div className="flex items-center justify-center gap-1 mt-2">
@@ -243,14 +252,15 @@ function PersonCard({ person, onViewSamples, onDelete, enrolled = false }: {
 }
 
 /* ── View samples dialog ── */
-function ViewSamplesDialog({ person, open, onOpenChange }: {
-  person: Person | null; open: boolean; onOpenChange: (v: boolean) => void;
+function ViewSamplesDialog({ person, open, onOpenChange, onZoom }: {
+  person: Person | null; open: boolean; onOpenChange: (v: boolean) => void; onZoom: (url: string) => void;
 }) {
   const { t } = useTranslation();
   const samplesQ = useQuery({
     queryKey: ["person-samples", person?.id],
     queryFn: () => fetchPersonSamples(person!.id),
     enabled: open && !!person,
+    staleTime: 300_000,
   });
 
   return (
@@ -265,12 +275,25 @@ function ViewSamplesDialog({ person, open, onOpenChange }: {
               <div key={i} className="aspect-square bg-muted animate-pulse rounded-md" />
             ))}
           </div>
+        ) : samplesQ.isError ? (
+          <div className="text-center py-10 space-y-2">
+            <p className="text-sm text-danger">{t("common.error")}</p>
+            <Button size="sm" variant="outline" onClick={() => samplesQ.refetch()}>{t("common.retry")}</Button>
+          </div>
         ) : samplesQ.data?.length ? (
           <div className="grid grid-cols-3 sm:grid-cols-4 gap-3 max-h-[60vh] overflow-y-auto pr-1">
             {samplesQ.data.map((url, i) => (
-              <div key={i} className="aspect-square overflow-hidden rounded-md border bg-muted">
-                <img src={url.startsWith("http") ? url : `${API_BASE_URL}/${url}`} className="w-full h-full object-cover" alt={`Sample ${i + 1}`} />
-              </div>
+              <button
+                key={i}
+                className="aspect-square overflow-hidden rounded-md border bg-muted hover:ring-2 hover:ring-primary transition-all"
+                onClick={() => onZoom(url)}
+              >
+                <img
+                  src={url.startsWith("http") ? url : `${API_BASE_URL}/${url}`}
+                  className="w-full h-full object-cover"
+                  alt={`Sample ${i + 1}`}
+                />
+              </button>
             ))}
           </div>
         ) : (
@@ -334,12 +357,12 @@ function AddPersonDialog({ open, onOpenChange }: { open: boolean; onOpenChange: 
             <Label className="text-xs font-medium mb-1 block">{t("gallery.facePhotos")}</Label>
             <label className="border-2 border-dashed rounded-md p-6 flex flex-col items-center justify-center cursor-pointer hover:bg-muted/30">
               <Upload className="h-6 w-6 text-muted-foreground mb-2" />
-              <span className="text-xs text-muted-foreground">JPG, PNG · multiple allowed</span>
+              <span className="text-xs text-muted-foreground">{t("gallery.uploadTypes")}</span>
               <input type="file" accept="image/*" multiple className="hidden"
                 onChange={(e) => setFiles(Array.from(e.target.files || []))} />
             </label>
             {files.length > 0 && (
-              <p className="text-xs text-muted-foreground mt-2">{files.length} file(s) selected</p>
+              <p className="text-xs text-muted-foreground mt-2">{t("gallery.filesSelected", { n: files.length })}</p>
             )}
             <p className="text-[11px] text-muted-foreground mt-2">{t("gallery.uploadHint")}</p>
           </div>

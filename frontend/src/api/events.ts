@@ -40,7 +40,20 @@ function buildQuery(q: EventsQuery): string {
   return s ? `?${s}` : "";
 }
 
-export async function fetchHealth(): Promise<{ status: string; total_events: number }> {
+export interface CameraLiveness {
+  id: string;
+  active: boolean;
+  age_seconds: number | null;
+}
+
+export interface HealthResponse {
+  status: string;
+  total_events: number;
+  dropped_events: number;
+  cameras: CameraLiveness[];
+}
+
+export async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch(`${API_BASE_URL}/health`);
   if (!res.ok) throw new Error("Health check failed");
   return res.json();
@@ -66,7 +79,9 @@ export async function fetchEventsCount(query: Omit<EventsQuery, "limit" | "offse
   const res = await fetch(`${API_BASE_URL}/events/count${qs}`);
   if (!res.ok) throw new Error("Failed to fetch event count");
   const data = await res.json();
-  return data.count as number;
+  const count = data?.count;
+  if (typeof count !== "number") throw new Error(`Unexpected count response: ${JSON.stringify(data)}`);
+  return count;
 }
 
 export async function fetchLatestEvents(query: EventsQuery = {}): Promise<SurveillanceEvent[]> {
@@ -119,17 +134,24 @@ export async function fetchClusterGroups(maxSnapshots = 4): Promise<ClusterGroup
   return res.json();
 }
 
-export async function triggerClustering(
-  minClusterSize = 2,
-  distanceThreshold = 0.45,
-): Promise<{
-  status: string;
+export interface ClusteringResult {
   n_embeddings: number;
   n_tracks: number;
   n_clusters: number;
   n_noise: number;
   unique_unauthorized: number;
-}> {
+}
+
+export interface ClusteringStatus {
+  status: "idle" | "running" | "done" | "error";
+  result: ClusteringResult | null;
+  error: string | null;
+}
+
+export async function triggerClustering(
+  minClusterSize = 2,
+  distanceThreshold = 0.45,
+): Promise<{ status: string }> {
   const res = await fetch(
     `${API_BASE_URL}/cluster/unknowns?min_cluster_size=${minClusterSize}&distance_threshold=${distanceThreshold}`,
     { method: "POST" },
@@ -138,6 +160,12 @@ export async function triggerClustering(
     const detail = await res.json().catch(() => ({}));
     throw new Error(detail?.detail ?? "Clustering failed");
   }
+  return res.json();
+}
+
+export async function fetchClusteringStatus(): Promise<ClusteringStatus> {
+  const res = await fetch(`${API_BASE_URL}/cluster/unknowns/status`);
+  if (!res.ok) throw new Error("Failed to fetch clustering status");
   return res.json();
 }
 

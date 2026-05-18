@@ -32,6 +32,10 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
   const listenersRef = useRef<Set<Listener>>(new Set());
+  // Delays backoff reset until the connection has been stable for 5 s.
+  const stableTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Coalesces high-frequency SSE events into one stats refetch per 2 s.
+  const statsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useCallback(() => {
     if (esRef.current) return;
@@ -40,7 +44,15 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     esRef.current = es;
 
     es.onopen = () => {
-      attemptRef.current = 0;
+      // Only reset backoff counter after 5 s of stable connection.
+      // If the server accepts TCP but immediately drops the stream (e.g., rolling
+      // restart behind a proxy), onopen fires instantly and onopen → onerror
+      // would permanently peg the retry delay at the minimum without this guard.
+      if (stableTimerRef.current) clearTimeout(stableTimerRef.current);
+      stableTimerRef.current = setTimeout(() => {
+        attemptRef.current = 0;
+        stableTimerRef.current = null;
+      }, 5_000);
     };
 
     es.onmessage = (msg) => {
@@ -48,8 +60,10 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       try {
         event = JSON.parse(msg.data) as SurveillanceEvent;
       } catch {
-        return; // keepalive comment or malformed — ignore
+        return; // keepalive comment or malformed JSON — ignore
       }
+      // Guard against valid JSON with wrong shape (e.g. keepalive objects).
+      if (!event || typeof event.event !== "string") return;
 
       // ── 1. Update "recent alerts" cache directly (dashboard, no HTTP round-trip)
       queryClient.setQueryData(
@@ -83,8 +97,15 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       void queryClient.invalidateQueries({ queryKey: ["report-count"] });
       void queryClient.invalidateQueries({ queryKey: ["report-events"] });
 
-      // ── 4b. Invalidate events-page stats summary
-      void queryClient.invalidateQueries({ queryKey: ["stats", "events-page"] });
+      // ── 4b. Debounced events-page stats summary invalidation.
+      // invalidateQueries bypasses staleTime and refetches immediately — at peak
+      // traffic (30+ events/min) this would hammer /stats/summary once per event.
+      // Coalesce into one refetch per 2 s instead.
+      if (statsDebounceRef.current) clearTimeout(statsDebounceRef.current);
+      statsDebounceRef.current = setTimeout(() => {
+        void queryClient.invalidateQueries({ queryKey: ["stats", "events-page"] });
+        statsDebounceRef.current = null;
+      }, 2_000);
 
       // ── 5. Refresh person gallery on AUTHORIZED (new snapshot + updated avg)
       if (event.event === "AUTHORIZED") {
@@ -110,6 +131,11 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     };
 
     es.onerror = () => {
+      // Cancel the stable-connection timer — the connection dropped.
+      if (stableTimerRef.current) {
+        clearTimeout(stableTimerRef.current);
+        stableTimerRef.current = null;
+      }
       es.close();
       esRef.current = null;
       const delay = Math.min(
@@ -125,6 +151,8 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     connect();
     return () => {
       if (retryRef.current) clearTimeout(retryRef.current);
+      if (stableTimerRef.current) clearTimeout(stableTimerRef.current);
+      if (statsDebounceRef.current) clearTimeout(statsDebounceRef.current);
       esRef.current?.close();
       esRef.current = null;
     };
