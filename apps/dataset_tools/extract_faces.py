@@ -134,12 +134,12 @@ def main():
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
                 
+                raw = frame[y1:y2, x1:x2]
+                if raw.size == 0:
+                    continue
                 if face.kps is not None:
-                    face_crop = align_face(frame, face.kps)
+                    face_crop = align_face(frame, face.kps, crop=raw)
                 else:
-                    raw = frame[y1:y2, x1:x2]
-                    if raw.size == 0:
-                        continue
                     face_crop = cv2.resize(raw, (112, 112))
 
                 save_path = person_output_dir / f"{img_path.stem}_{i:03d}.jpg"

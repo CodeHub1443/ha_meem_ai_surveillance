@@ -201,6 +201,13 @@ class CameraWorker:
             self._logged_size_reject.discard(tid)
             self._logged_blur_reject.discard(tid)
 
+        # Purge log-suppress sets for tracks OC-SORT dropped that never produced
+        # embeddings (too small / too blurry throughout) — those IDs never appear
+        # in expire_stale_tracks() because the aggregator has no entry for them.
+        active_ids = self.tracker.get_active_track_ids()
+        self._logged_size_reject &= active_ids
+        self._logged_blur_reject &= active_ids
+
         # Flush held unknowns whose hold period elapsed (person still in frame)
         for tid, held in self.state.pop_overdue_unknowns(self.unknown_hold_seconds):
             ts = datetime.fromisoformat(held["event_data"]["timestamp"])
@@ -263,7 +270,7 @@ class CameraWorker:
             face.quality_score = blur * face.confidence * pw * size_factor
             valid_faces.append(face)
             aligned = (
-                align_face(frame, face.kps)
+                align_face(frame, face.kps, crop=crop)
                 if face.kps is not None
                 else cv2.resize(crop, (112, 112))
             )
@@ -304,6 +311,10 @@ class CameraWorker:
 
             if upgradeable:
                 if identity is None or score < self.similarity_threshold:
+                    log.debug(
+                        f"[{self.camera_id}] UPGRADE skipped track={face.track_id}: "
+                        f"score={score:.4f} below threshold={self.similarity_threshold}"
+                    )
                     continue
                 log.info(
                     f"[{self.camera_id}] UPGRADE track={face.track_id}: "
@@ -315,6 +326,10 @@ class CameraWorker:
                 emit_identity, emit_event = identity, "AUTHORIZED"
             else:
                 if not self.state.can_alert(identity, face.track_id):
+                    log.debug(
+                        f"[{self.camera_id}] COOLDOWN suppressed track={face.track_id} "
+                        f"identity={identity or 'UNKNOWN'}"
+                    )
                     continue
                 self.state.mark_decided(face.track_id, identity)
                 emit_identity = identity

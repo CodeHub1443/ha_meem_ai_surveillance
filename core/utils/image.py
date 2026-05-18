@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from typing import Tuple
+from typing import Optional, Tuple
 
 # ArcFace canonical 5-point reference (for 112×112 output)
 _ARCFACE_REF_KEYPOINTS = np.array([
@@ -41,22 +41,29 @@ def pose_weight(kps: np.ndarray) -> float:
     return float(max(0.1, 1.0 - nose_offset * 1.8))
 
 
-def align_face(image: np.ndarray, kps: np.ndarray, image_size: int = 112) -> np.ndarray:
+def align_face(
+    image: np.ndarray,
+    kps: np.ndarray,
+    crop: Optional[np.ndarray] = None,
+    image_size: int = 112,
+) -> np.ndarray:
     """Affine-warp a face crop to the ArcFace canonical 112×112 pose.
 
     Uses SCRFD's 5-point landmarks (left eye, right eye, nose, left mouth,
     right mouth) to estimate a similarity transform and warp the face into the
     standard frontal position expected by AdaFace/ArcFace models.
 
-    Falls back to a plain resize when landmarks are unavailable or the transform
-    cannot be estimated (degenerate geometry).
+    Falls back to resizing ``crop`` when the transform cannot be estimated
+    (degenerate geometry — extreme profile, edge-of-frame landmarks).
+    ``image`` is used as a last resort only when no crop is provided.
     """
     ref = _ARCFACE_REF_KEYPOINTS * (image_size / 112.0)
     M, _ = cv2.estimateAffinePartial2D(
         kps.astype(np.float32), ref, method=cv2.LMEDS
     )
     if M is None:
-        return cv2.resize(image, (image_size, image_size))
+        fallback = crop if crop is not None else image
+        return cv2.resize(fallback, (image_size, image_size))
     return cv2.warpAffine(
         image, M, (image_size, image_size),
         flags=cv2.INTER_LINEAR,
