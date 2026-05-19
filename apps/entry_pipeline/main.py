@@ -357,7 +357,7 @@ class CameraWorker:
 
             # Resize to stream resolution once for snapshot/hold — avoids a ~6 MB
             # full-res copy on the hot path (io_worker copies again inside submit).
-            snap_frame = cv2.resize(annotated, (_STREAM_WIDTH, _STREAM_HEIGHT))
+            snap_frame = cv2.resize(frame, (_STREAM_WIDTH, _STREAM_HEIGHT))
 
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
