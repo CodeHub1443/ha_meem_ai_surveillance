@@ -33,6 +33,7 @@ from core.recognition import AdaFaceRecognizer
 from core.tracking import OCSORTTracker
 from core.utils.config import load_config
 from core.utils.image import align_face, pose_weight
+from core import pipeline_metrics
 
 logging.basicConfig(
     level=logging.INFO,
@@ -159,6 +160,13 @@ class CameraWorker:
         self._logged_size_reject: set = set()
         self._logged_blur_reject: set = set()
 
+        # Baseline metrics — Phase 0 instrumentation (no behaviour change)
+        self.metrics = pipeline_metrics.get_or_create(self.camera_id)
+        # Maps track_id → last emitted event type for flip detection
+        self._track_last_event: dict = {}
+        # Timestamp of last daily metric summary log
+        self._last_metric_log_day: int = -1
+
         self.running = False
 
         self._last_stream_ts: float = 0.0
@@ -188,6 +196,11 @@ class CameraWorker:
         # ── 4. Self-expiry: clean aggregator + state ───────────────────
         expired_ids = self.aggregator.expire_stale_tracks()
         for tid in expired_ids:
+            # RC3 baseline counter: count every time a decided track's identity
+            # is about to be erased by aggregator expiry (not OC-SORT drop).
+            # Phase 1 will guard this; Phase 0 only measures it.
+            if self.state.is_decided(tid):
+                self.metrics.record_decided_clobber()
             held = self.state.release_track(tid)
             if held is not None:
                 # Person left frame without being recognised → emit now
@@ -269,11 +282,17 @@ class CameraWorker:
             size_factor = min(face.width / 112.0, 1.0)
             face.quality_score = blur * face.confidence * pw * size_factor
             valid_faces.append(face)
-            aligned = (
-                align_face(frame, face.kps, crop=crop)
-                if face.kps is not None
-                else cv2.resize(crop, (112, 112))
-            )
+            if face.kps is not None:
+                aligned, align_ok = align_face(frame, face.kps, crop=crop)
+            else:
+                aligned, align_ok = cv2.resize(crop, (112, 112)), False
+            # Phase 0: count alignment fallbacks; Phase 2 will skip these frames.
+            if not align_ok:
+                self.metrics.record_alignment_fallback()
+                log.debug(
+                    f"[{self.camera_id}] track={tid} alignment fallback counted "
+                    f"(raw crop resize used — will be skipped in Phase 2)"
+                )
             valid_crops.append(aligned)
 
         # ── 6. Batched recognition ────────────────────────────────────
@@ -334,6 +353,17 @@ class CameraWorker:
                 self.state.mark_decided(face.track_id, identity)
                 emit_identity = identity
                 emit_event = "AUTHORIZED" if identity else "UNKNOWN"
+
+            # ── Baseline metrics for this decision ─────────────────────
+            self.metrics.record_event(face.track_id)
+            prev_event = self._track_last_event.get(face.track_id)
+            if prev_event == "AUTHORIZED" and emit_event == "UNKNOWN":
+                self.metrics.record_track_flip()
+                log.warning(
+                    f"[{self.camera_id}] TRACK FLIP detected: track={face.track_id} "
+                    f"AUTHORIZED → UNKNOWN (RC3 symptom)"
+                )
+            self._track_last_event[face.track_id] = emit_event
 
             # ── 8. Emit event (async I/O) ──────────────────────────────
             event_data = {
@@ -436,6 +466,12 @@ class CameraWorker:
                     consecutive_failures = 0
                     frame_ts = datetime.now()
                     t0 = time.perf_counter()
+
+                    # Daily metric summary — log once per calendar day
+                    today = frame_ts.toordinal()
+                    if today != self._last_metric_log_day:
+                        self._last_metric_log_day = today
+                        self.metrics.log_summary(log)
 
                     # Main processing step: detection, tracking, recognition, and event generation
                     annotated = self._process_frame(frame, frame_ts)

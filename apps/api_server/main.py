@@ -19,6 +19,7 @@ import yaml
 
 from core import frame_buffer as _fb
 from core import io_worker as _io_worker
+from core import pipeline_metrics as _pipeline_metrics
 from core.clustering import run_clustering
 from core.database.event_store import EventStore
 from core.database.person_store import PersonStore, make_person_id
@@ -436,6 +437,21 @@ def get_stats_summary(
         "unique_unauthorized": unique_unauthorized,
         "last_clustered_at": meta["last_run_at"] if meta else None,
         "total_unknown_embeddings": _event_store.count_unknown_embeddings(),
+    }
+
+
+
+@app.get("/stats/pipeline")
+def get_pipeline_metrics():
+    """Per-camera pipeline health metrics for the Phase 0 baseline.
+
+    Returns alignment fallback counts, track flip counts, decided-clobber
+    counts, and events-per-track distribution for every active camera worker.
+    All counters are since process start (reset on restart).
+    """
+    return {
+        "cameras": _pipeline_metrics.all_snapshots(),
+        "io_dropped_events": _io_worker.get_dropped_count(),
     }
 
 
