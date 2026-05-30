@@ -78,15 +78,13 @@ class AsyncIOWorker:
                 # If the frontend refetches immediately on SSE, the row is already there.
                 if self._event_store is not None:
                     try:
-                        self._event_store.insert(event_data)
                         if embedding is not None and event_data.get("event") == "UNKNOWN":
-                            self._event_store.insert_unknown_embedding(
-                                track_id=event_data["track_id"],
-                                camera_id=event_data["camera_id"],
-                                timestamp=event_data["timestamp"],
-                                embedding=embedding,
-                                snapshot=snapshot_path,
-                            )
+                            # Atomic write: event row + embedding blob in one transaction.
+                            # A crash between two separate commits would leave an orphaned
+                            # event row with no embedding; the combined method prevents that.
+                            self._event_store.insert_with_embedding(event_data, embedding)
+                        else:
+                            self._event_store.insert(event_data)
                     except Exception as db_exc:
                         log.error("EventStore insert failed: %s", db_exc)
                 self._event_emitter.emit(event_data)

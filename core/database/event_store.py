@@ -8,6 +8,18 @@ import numpy as np
 
 DB_PATH = "logs/events.db"
 
+# ROW_NUMBER() window functions require SQLite 3.25.0 (2018-09-15).
+# Warn at import time so failures surface at startup, not on first API call.
+_sqlite_ver = tuple(int(x) for x in sqlite3.sqlite_version.split("."))
+if _sqlite_ver < (3, 25, 0):
+    import warnings
+    warnings.warn(
+        f"SQLite {sqlite3.sqlite_version} is older than 3.25.0 — "
+        "get_cluster_groups() will fall back to a Python-side sort.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
+
 
 class EventStore:
     """SQLite-backed persistent store for detection events.
@@ -56,6 +68,7 @@ class EventStore:
             CREATE INDEX IF NOT EXISTS idx_events_camera   ON events(camera_id);
             CREATE INDEX IF NOT EXISTS idx_events_identity ON events(identity);
             CREATE INDEX IF NOT EXISTS idx_events_ts       ON events(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_events_cam_ts   ON events(camera_id, timestamp);
 
             CREATE TABLE IF NOT EXISTS unknown_embeddings (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,9 +79,10 @@ class EventStore:
                 embedding  BLOB NOT NULL,
                 cluster_id INTEGER
             );
-            CREATE INDEX IF NOT EXISTS idx_uemb_ts  ON unknown_embeddings(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_uemb_cam ON unknown_embeddings(camera_id);
-            CREATE INDEX IF NOT EXISTS idx_uemb_cid ON unknown_embeddings(cluster_id);
+            CREATE INDEX IF NOT EXISTS idx_uemb_ts    ON unknown_embeddings(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_uemb_cam   ON unknown_embeddings(camera_id);
+            CREATE INDEX IF NOT EXISTS idx_uemb_cid   ON unknown_embeddings(cluster_id);
+            CREATE INDEX IF NOT EXISTS idx_uemb_track ON unknown_embeddings(track_id);
 
             CREATE TABLE IF NOT EXISTS cluster_meta (
                 id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -100,6 +114,50 @@ class EventStore:
             ),
         )
         conn.commit()
+        return cur.lastrowid
+
+    def insert_with_embedding(
+        self,
+        event: dict,
+        embedding: np.ndarray,
+    ) -> int:
+        """Atomically insert an UNKNOWN event row and its embedding blob.
+
+        Using a single ``with conn:`` transaction guarantees that a crash
+        between the two writes never leaves an orphaned event row without an
+        embedding — the whole pair is either committed or rolled back.
+
+        Returns the new events row id.
+        """
+        blob = embedding.astype(np.float32).tobytes()
+        conn = self._conn()
+        with conn:
+            cur = conn.execute(
+                """INSERT INTO events
+                   (timestamp, camera_id, track_id, identity, score, event_type, snapshot)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event.get("timestamp"),
+                    event.get("camera_id"),
+                    event.get("track_id"),
+                    event.get("identity"),
+                    event.get("score"),
+                    event.get("event"),
+                    event.get("snapshot"),
+                ),
+            )
+            conn.execute(
+                """INSERT INTO unknown_embeddings
+                   (track_id, camera_id, timestamp, snapshot, embedding)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    event.get("track_id"),
+                    event.get("camera_id"),
+                    event.get("timestamp"),
+                    event.get("snapshot"),
+                    blob,
+                ),
+            )
         return cur.lastrowid
 
     # ── Read ───────────────────────────────────────────────────────────────────
@@ -195,6 +253,35 @@ class EventStore:
     def count_unknown_embeddings(self) -> int:
         return self._conn().execute("SELECT COUNT(*) FROM unknown_embeddings").fetchone()[0]
 
+    def prune_clustered_embeddings(self) -> int:
+        """Null-out embedding BLOBs for rows that already have a cluster label.
+
+        Rows are kept for audit (track_id / camera_id / timestamps stay intact)
+        but the 2 KB per-row BLOB is freed.  Safe to call after every clustering
+        run.  Returns the number of rows updated.
+        """
+        conn = self._conn()
+        cur = conn.execute(
+            "UPDATE unknown_embeddings SET embedding = NULL WHERE cluster_id IS NOT NULL AND embedding IS NOT NULL"
+        )
+        conn.commit()
+        return cur.rowcount
+
+    def prune_old_unknown_embeddings(self, keep_days: int = 365) -> int:
+        """Delete unknown_embedding rows older than *keep_days* days.
+
+        Prevents unbounded table growth.  The default 365-day window keeps one
+        year of history for audits while bounding O(n²) clustering cost.
+        Returns the number of rows deleted.
+        """
+        conn = self._conn()
+        cur = conn.execute(
+            "DELETE FROM unknown_embeddings WHERE timestamp < datetime('now', ?)",
+            (f"-{keep_days} days",),
+        )
+        conn.commit()
+        return cur.rowcount
+
     # ── Cluster results ────────────────────────────────────────────────────────
 
     def update_cluster_results(
@@ -250,19 +337,37 @@ class EventStore:
             ORDER  BY track_count DESC, cluster_id
         """).fetchall()
 
-        # Up to max_snapshots non-null snapshots per cluster (most recent first)
-        snap_rows = conn.execute("""
-            WITH ranked AS (
-                SELECT cluster_id, snapshot,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY cluster_id
-                           ORDER BY timestamp DESC
-                       ) AS rn
+        # Up to max_snapshots non-null snapshots per cluster (most recent first).
+        # ROW_NUMBER() requires SQLite ≥ 3.25.0.  Fall back to a Python-side
+        # grouping pass on older versions (e.g. system SQLite on some Linuxes).
+        if _sqlite_ver >= (3, 25, 0):
+            snap_rows = conn.execute("""
+                WITH ranked AS (
+                    SELECT cluster_id, snapshot,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY cluster_id
+                               ORDER BY timestamp DESC
+                           ) AS rn
+                    FROM unknown_embeddings
+                    WHERE cluster_id >= 0 AND snapshot IS NOT NULL
+                )
+                SELECT cluster_id, snapshot FROM ranked WHERE rn <= ?
+            """, (max_snapshots,)).fetchall()
+        else:
+            # Fallback: fetch all snapshots, truncate in Python.
+            all_snaps = conn.execute("""
+                SELECT cluster_id, snapshot
                 FROM unknown_embeddings
                 WHERE cluster_id >= 0 AND snapshot IS NOT NULL
-            )
-            SELECT cluster_id, snapshot FROM ranked WHERE rn <= ?
-        """, (max_snapshots,)).fetchall()
+                ORDER BY timestamp DESC
+            """).fetchall()
+            seen: Dict[int, int] = {}
+            snap_rows = []
+            for r in all_snaps:
+                cid = r["cluster_id"]
+                seen[cid] = seen.get(cid, 0) + 1
+                if seen[cid] <= max_snapshots:
+                    snap_rows.append(r)
 
         snap_map: Dict[int, List[str]] = {}
         for r in snap_rows:
@@ -332,16 +437,17 @@ class EventStore:
             params.append(until)
         where = "WHERE " + " AND ".join(clauses)
 
-        conn = self._conn()
-        n_clusters = conn.execute(
-            f"SELECT COUNT(DISTINCT cluster_id) FROM unknown_embeddings {where} AND cluster_id >= 0",
-            params,
-        ).fetchone()[0]
-        n_singletons = conn.execute(
-            f"SELECT COUNT(DISTINCT track_id) FROM unknown_embeddings {where} AND cluster_id = -1",
-            params,
-        ).fetchone()[0]
-        return n_clusters + n_singletons
+        # Single query avoids a TOCTOU race between two separate counts.
+        # Clusters contribute one unit per distinct cluster_id (≥ 0);
+        # singletons contribute one unit per distinct track_id (cluster_id = -1).
+        sql = f"""
+            SELECT
+                COUNT(DISTINCT CASE WHEN cluster_id >= 0 THEN cluster_id  END) +
+                COUNT(DISTINCT CASE WHEN cluster_id =  -1 THEN track_id    END)
+            FROM unknown_embeddings
+            {where}
+        """
+        return self._conn().execute(sql, params).fetchone()[0]
 
     # ── Internal ───────────────────────────────────────────────────────────────
 

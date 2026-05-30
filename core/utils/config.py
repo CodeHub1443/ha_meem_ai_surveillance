@@ -29,3 +29,16 @@ def load_config(*paths: str) -> Dict:
     for path in paths:
         result = _deep_merge(result, load_yaml(path))
     return result
+
+
+def load_site_config() -> Dict:
+    """Load default config and overlay site-specific local.yaml if present."""
+    base_path = "configs/default.yaml"
+    local_path = "configs/local.yaml"
+    config = load_yaml(base_path)
+    if Path(local_path).exists():
+        local = load_yaml(local_path)
+        config = _deep_merge(config, local)
+    return config
+
+

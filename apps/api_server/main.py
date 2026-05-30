@@ -21,7 +21,7 @@ from core import frame_buffer as _fb
 from core import io_worker as _io_worker
 from core.clustering import run_clustering
 from core.database.event_store import EventStore
-from core.database.person_store import PersonStore
+from core.database.person_store import PersonStore, make_person_id
 
 # ── Gallery cache ──────────────────────────────────────────────────────────────
 _gallery_cache: Optional[Dict[str, Any]] = None
@@ -452,6 +452,14 @@ def _run_clustering_bg(min_cluster_size: int, distance_threshold: float) -> None
             min_cluster_size=min_cluster_size,
             distance_threshold=distance_threshold,
         )
+        # Free embedding BLOBs for rows that now have a cluster label.
+        # Rows are kept for audit; only the 2 KB BLOB per row is nulled out.
+        try:
+            pruned = _event_store.prune_clustered_embeddings()
+            if pruned:
+                log.info("Pruned %d embedding BLOBs after clustering", pruned)
+        except Exception as prune_exc:
+            log.warning("prune_clustered_embeddings failed: %s", prune_exc)
         _clustering_state = {"status": "done", "result": result, "error": None}
     except Exception as exc:
         _clustering_state = {"status": "error", "result": None, "error": str(exc)}
@@ -581,7 +589,10 @@ def create_person(
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
 
-    person_id = re.sub(r"[^a-z0-9_]", "_", name.lower().replace(" ", "_")).strip("_") or "person"
+    # Use the same ID derivation as PersonStore.create() so both sides agree.
+    # The old re.sub(r"[^a-z0-9_]") stripped Unicode letters, turning Bengali
+    # names like "রাহেলা" into "person" and causing silent ID collisions.
+    person_id = make_person_id(name)
     if _person_store.exists(person_id):
         raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
 

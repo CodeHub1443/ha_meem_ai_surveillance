@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -5,6 +6,24 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 DB_PATH = "logs/events.db"
+
+
+def make_person_id(name: str) -> str:
+    """Derive a stable, URL-safe ID from a person's display name.
+
+    Rules:
+    - Unicode letters and digits are kept as-is (handles Bengali / Arabic names).
+    - Any run of whitespace or punctuation is collapsed to a single underscore.
+    - Leading/trailing underscores are stripped.
+    - Empty result falls back to ``"person"``.
+
+    This function is also called by the API layer so both places produce
+    identical IDs, preventing the "Bengali name → 'person'" mismatch that
+    occurred when the API used a different regex than the store.
+    """
+    slug = re.sub(r"[\s\W]+", "_", name.strip(), flags=re.UNICODE).strip("_")
+    return slug.lower() or "person"
+
 
 STATUSES = {"pending", "enrolled"}
 
@@ -67,7 +86,7 @@ class PersonStore:
         thumbnail_url: Optional[str] = None,
     ) -> str:
         """Insert a new person with status='pending'. Returns the person id."""
-        person_id = name.lower().replace(" ", "_")
+        person_id = make_person_id(name)
         conn = self._conn()
         conn.execute(
             """INSERT INTO persons
