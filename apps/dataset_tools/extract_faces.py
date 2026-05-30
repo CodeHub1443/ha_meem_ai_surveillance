@@ -138,7 +138,7 @@ def main():
                 if raw.size == 0:
                     continue
                 if face.kps is not None:
-                    face_crop = align_face(frame, face.kps, crop=raw)
+                    face_crop, _ = align_face(frame, face.kps, crop=raw)
                 else:
                     face_crop = cv2.resize(raw, (112, 112))
 
