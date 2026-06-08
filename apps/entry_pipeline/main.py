@@ -194,30 +194,30 @@ class CameraWorker:
             ]
 
         # ── 4. Self-expiry: clean aggregator + state ───────────────────
+        # Phase 1 (RC3 fix): snapshot active OC-SORT tracks BEFORE expiry.
+        # A track absent from OC-SORT is truly gone; one still present just
+        # had a SCRFD detection gap (face turned away) and must keep its
+        # identity state intact.
+        active_ids = self.tracker.get_active_track_ids()
+
         expired_ids = self.aggregator.expire_stale_tracks()
         for tid in expired_ids:
-            # RC3 baseline counter: count every time a decided track's identity
-            # is about to be erased by aggregator expiry (not OC-SORT drop).
-            # Phase 1 will guard this; Phase 0 only measures it.
             if self.state.is_decided(tid):
                 self.metrics.record_decided_clobber()
-            held = self.state.release_track(tid)
-            if held is not None:
-                # Person left frame without being recognised → emit now
-                ts = datetime.fromisoformat(held["event_data"]["timestamp"])
-                self.io_worker.submit(
-                    held["frame"], held["event_data"], None, ts, held["embedding"]
-                )
-                log.info(
-                    f"[{self.camera_id}] EMIT DEFERRED UNKNOWN track={tid} (track expired)"
-                )
+            if tid not in active_ids:
+                # OC-SORT also dropped this track — person truly left the frame.
+                held = self.state.release_track(tid)
+                if held is not None:
+                    ts = datetime.fromisoformat(held["event_data"]["timestamp"])
+                    self.io_worker.submit(
+                        held["frame"], held["event_data"], None, ts, held["embedding"]
+                    )
+                    log.info(
+                        f"[{self.camera_id}] EMIT DEFERRED UNKNOWN track={tid} (track lost)"
+                    )
             self._logged_size_reject.discard(tid)
             self._logged_blur_reject.discard(tid)
 
-        # Purge log-suppress sets for tracks OC-SORT dropped that never produced
-        # embeddings (too small / too blurry throughout) — those IDs never appear
-        # in expire_stale_tracks() because the aggregator has no entry for them.
-        active_ids = self.tracker.get_active_track_ids()
         self._logged_size_reject &= active_ids
         self._logged_blur_reject &= active_ids
 
