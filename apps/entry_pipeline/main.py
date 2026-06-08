@@ -281,18 +281,24 @@ class CameraWorker:
             pw = pose_weight(face.kps) if face.kps is not None else 1.0
             size_factor = min(face.width / 112.0, 1.0)
             face.quality_score = blur * face.confidence * pw * size_factor
-            valid_faces.append(face)
+
             if face.kps is not None:
                 aligned, align_ok = align_face(frame, face.kps, crop=crop)
             else:
                 aligned, align_ok = cv2.resize(crop, (112, 112)), False
-            # Phase 0: count alignment fallbacks; Phase 2 will skip these frames.
+
             if not align_ok:
+                # Phase 2 (RC2 fix): degenerate geometry — extreme profile or
+                # edge-of-frame landmarks.  Raw-crop resize produces a garbage
+                # embedding that dilutes the consensus.  Skip the frame entirely
+                # rather than feeding noise into the aggregator.
                 self.metrics.record_alignment_fallback()
                 log.debug(
-                    f"[{self.camera_id}] track={tid} alignment fallback counted "
-                    f"(raw crop resize used — will be skipped in Phase 2)"
+                    f"[{self.camera_id}] track={tid} alignment failed — frame skipped"
                 )
+                continue
+
+            valid_faces.append(face)
             valid_crops.append(aligned)
 
         # ── 6. Batched recognition ────────────────────────────────────
