@@ -34,7 +34,7 @@ def pose_weight(kps: np.ndarray) -> float:
     left_eye, right_eye, nose = kps[0], kps[1], kps[2]
     eye_dist = abs(float(right_eye[0]) - float(left_eye[0]))
     if eye_dist < 1.0:
-        return 0.5
+        return 0.1
     eye_center_x = (float(left_eye[0]) + float(right_eye[0])) / 2.0
     nose_offset = abs(float(nose[0]) - eye_center_x) / eye_dist
     # 0.0 offset (frontal) → 1.0 weight; 0.5+ offset (profile) → 0.1 weight
