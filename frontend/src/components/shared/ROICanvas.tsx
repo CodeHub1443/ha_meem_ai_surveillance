@@ -15,9 +15,9 @@ import type { Camera as CameraType } from "@/types/surveillance";
 // Internal canvas drawing resolution (16:9)
 const CW = 960;
 const CH = 540;
-// Assumed actual camera frame resolution for coordinate scaling
-const FRAME_W = 1920;
-const FRAME_H = 1080;
+// Fallback frame resolution when no snapshot has been loaded yet
+const DEFAULT_FRAME_W = 1920;
+const DEFAULT_FRAME_H = 1080;
 
 interface ROI { x1: number; y1: number; x2: number; y2: number }
 interface Rect { x: number; y: number; w: number; h: number }
@@ -29,32 +29,34 @@ interface ROICanvasProps {
   onConfirm: (roi: ROI) => void;
 }
 
-function roiToRect(roi: ROI): Rect {
+function roiToRect(roi: ROI, fw: number, fh: number): Rect {
   return {
-    x: (roi.x1 / FRAME_W) * CW,
-    y: (roi.y1 / FRAME_H) * CH,
-    w: ((roi.x2 - roi.x1) / FRAME_W) * CW,
-    h: ((roi.y2 - roi.y1) / FRAME_H) * CH,
+    x: (roi.x1 / fw) * CW,
+    y: (roi.y1 / fh) * CH,
+    w: ((roi.x2 - roi.x1) / fw) * CW,
+    h: ((roi.y2 - roi.y1) / fh) * CH,
   };
 }
 
-function rectToRoi(r: Rect): ROI {
+function rectToRoi(r: Rect, fw: number, fh: number): ROI {
   return {
-    x1: Math.round((r.x / CW) * FRAME_W),
-    y1: Math.round((r.y / CH) * FRAME_H),
-    x2: Math.round(((r.x + r.w) / CW) * FRAME_W),
-    y2: Math.round(((r.y + r.h) / CH) * FRAME_H),
+    x1: Math.round((r.x / CW) * fw),
+    y1: Math.round((r.y / CH) * fh),
+    x2: Math.round(((r.x + r.w) / CW) * fw),
+    y2: Math.round(((r.y + r.h) / CH) * fh),
   };
 }
 
-function isFullFrame(roi: ROI) {
-  return roi.x1 === 0 && roi.y1 === 0 && roi.x2 === FRAME_W && roi.y2 === FRAME_H;
+function isFullFrame(roi: ROI, fw: number, fh: number) {
+  return roi.x1 === 0 && roi.y1 === 0 && roi.x2 === fw && roi.y2 === fh;
 }
 
 export function ROICanvas({ open, onOpenChange, camera, onConfirm }: ROICanvasProps) {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [snapshotSrc, setSnapshotSrc] = useState<string | null>(null);
+  const [frameW, setFrameW] = useState(DEFAULT_FRAME_W);
+  const [frameH, setFrameH] = useState(DEFAULT_FRAME_H);
   const [loadingSnap, setLoadingSnap] = useState(false);
   const [drawing, setDrawing] = useState(false);
   const [startPt, setStartPt] = useState({ x: 0, y: 0 });
@@ -64,12 +66,12 @@ export function ROICanvas({ open, onOpenChange, camera, onConfirm }: ROICanvasPr
   useEffect(() => {
     if (!open) return;
     setSnapshotSrc(null);
-    if (isFullFrame(camera.roi)) {
+    if (isFullFrame(camera.roi, frameW, frameH)) {
       setRect(null);
     } else {
-      setRect(roiToRect(camera.roi));
+      setRect(roiToRect(camera.roi, frameW, frameH));
     }
-  }, [open, camera.roi]);
+  }, [open, camera.roi, frameW, frameH]);
 
   // Redraw canvas overlay whenever rect changes
   useEffect(() => {
@@ -139,8 +141,12 @@ export function ROICanvas({ open, onOpenChange, camera, onConfirm }: ROICanvasPr
     try {
       const r = await requestSnapshot(camera.id);
       setSnapshotSrc(`data:image/jpeg;base64,${r.image_base64}`);
+      if (r.width && r.height) {
+        setFrameW(r.width);
+        setFrameH(r.height);
+      }
     } catch {
-      /* keep placeholder — stub returns 1x1 transparent PNG */
+      /* keep placeholder */
     } finally {
       setLoadingSnap(false);
     }
@@ -148,26 +154,26 @@ export function ROICanvas({ open, onOpenChange, camera, onConfirm }: ROICanvasPr
 
   const handleConfirm = () => {
     if (!rect || rect.w < 4 || rect.h < 4) {
-      onConfirm({ x1: 0, y1: 0, x2: FRAME_W, y2: FRAME_H });
+      onConfirm({ x1: 0, y1: 0, x2: frameW, y2: frameH });
     } else {
-      onConfirm(rectToRoi(rect));
+      onConfirm(rectToRoi(rect, frameW, frameH));
     }
     onOpenChange(false);
   };
 
   const handleClear = () => {
     setRect(null);
-    onConfirm({ x1: 0, y1: 0, x2: FRAME_W, y2: FRAME_H });
+    onConfirm({ x1: 0, y1: 0, x2: frameW, y2: frameH });
     onOpenChange(false);
   };
 
   const roiLabel =
     rect && rect.w > 4 && rect.h > 4
       ? (() => {
-          const r = rectToRoi(rect);
+          const r = rectToRoi(rect, frameW, frameH);
           return `x1=${r.x1}, y1=${r.y1}, x2=${r.x2}, y2=${r.y2}`;
         })()
-      : `Full Frame (0, 0, ${FRAME_W}, ${FRAME_H})`;
+      : `Full Frame (0, 0, ${frameW}, ${frameH})`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

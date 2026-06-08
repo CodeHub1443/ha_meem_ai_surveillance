@@ -586,9 +586,11 @@ def run_pipeline():
         log.error("configs/cameras.yaml not found")
         return
 
-    cameras = camera_cfg.get("cameras", [])
+    all_cameras = camera_cfg.get("cameras", [])
+    # Honour explicit active flag; fall back to URL-presence check for legacy entries
+    cameras = [c for c in all_cameras if c.get("active", bool(c.get("url")))]
     if not cameras:
-        log.error("No cameras defined in cameras.yaml")
+        log.error("No active cameras defined in cameras.yaml")
         return
 
     _cleanup_old_snapshots(
@@ -609,12 +611,50 @@ def run_pipeline():
         t.start()
 
     log.info("Pipeline running — frames shared via in-memory buffer. Press Ctrl+C to stop.")
+    _cam_cfg_path = "configs/cameras.yaml"
+    _worker_map = {w.camera_id: w for w in workers}
+    _cam_cfg_mtime = os.path.getmtime(_cam_cfg_path)
     try:
         # Keep main thread alive while worker threads run; 1s timeout lets
         # KeyboardInterrupt be delivered promptly even inside join().
         while any(t.is_alive() for t in threads):
             for t in threads:
                 t.join(timeout=1.0)
+            # Hot-reload config when cameras.yaml is modified externally (e.g. via API).
+            try:
+                mtime = os.path.getmtime(_cam_cfg_path)
+                if mtime != _cam_cfg_mtime:
+                    _cam_cfg_mtime = mtime
+                    with open(_cam_cfg_path) as f:
+                        reloaded = yaml.safe_load(f) or {}
+                    for cam_cfg in reloaded.get("cameras", []):
+                        cid = cam_cfg["id"]
+                        is_active = cam_cfg.get("active", bool(cam_cfg.get("url")))
+
+                        if cid in _worker_map:
+                            worker = _worker_map[cid]
+                            # ROI: applied immediately without restart
+                            worker.set_roi(cam_cfg.get("roi"))
+                            log.info("[%s] ROI hot-reloaded: %s", cid, cam_cfg.get("roi"))
+                            # Disable: stop worker immediately
+                            if not is_active and worker.running:
+                                log.info("[%s] Disabled via config — stopping worker", cid)
+                                worker.stop()
+                        elif is_active and cam_cfg.get("url"):
+                            # New camera added at runtime with a valid URL — spawn its worker now
+                            log.info("[%s] New camera detected in config — spawning worker", cid)
+                            new_worker = CameraWorker(cam_cfg, models, config)
+                            new_thread = threading.Thread(
+                                target=new_worker.run,
+                                daemon=True,
+                                name=f"cam-{cid}",
+                            )
+                            _worker_map[cid] = new_worker
+                            workers.append(new_worker)
+                            threads.append(new_thread)
+                            new_thread.start()
+            except Exception as e:
+                log.warning("Config hot-reload check failed: %s", e)
     except KeyboardInterrupt:
         log.info("Interrupt received — shutting down…")
     finally:

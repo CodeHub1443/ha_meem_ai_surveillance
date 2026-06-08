@@ -1,6 +1,16 @@
 cameras:
 - id: camera_01
+  name: Front Entrance Entry
   url: rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=31&subtype=0
-  name: Front Entrance
-  roi: [628, 170, 1424, 833]
-- {id: camera_02, url: null, name: Back Exit, roi: null}
+  active: true
+  roi: [227, 563, 1110, 1079]
+- id: camera_02
+  name: Back Entrance Exit
+  url: rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=25&subtype=0
+  active: true
+  roi: [529, 207, 1294, 718]
+- id: camera_03
+  name: Back Entrance Entry
+  url: rtsp://admin:admin123@175.29.168.110:6222/cam/realmonitor?channel=32&subtype=0
+  active: true
+  roi: [613, 437, 2310, 1424]

@@ -46,7 +46,22 @@
       "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Directory -Depth 2 | Where-Object {$_.FullName -notmatch 'node_modules|__pycache__|\\\\.claude|whatsapp_session'} | Select-Object -ExpandProperty FullName | Sort-Object)",
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\" -Recurse -Filter \"*.py\")",
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\core\\\\database\\\\\" -Filter \"*.py\" -Recurse | Select-Object -ExpandProperty FullName)",
-      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\frontend\\\\src\" -Recurse -File)"
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\acer\\\\Desktop\\\\TDI\\\\Ha-meem\\\\FR\\\\ha_meem_ai_surveillance\\\\frontend\\\\src\" -Recurse -File)",
+      "WebSearch",
+      "WebFetch(domain:developer.nvidia.com)",
+      "WebFetch(domain:www.diamondsystems.com)",
+      "WebFetch(domain:developer.ridgerun.com)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:www.e-consystems.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:www.ijert.org)",
+      "Bash(curl -s http://localhost:8000/cameras/camera_02/stream-status)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(python -m json.tool)",
+      "Bash(curl -s http://localhost:8000/cameras)",
+      "Bash(curl -s http://localhost:8000/cameras/camera_01/stream-status)",
+      "Bash(curl -s \"http://localhost:8000/cameras/camera_01/stream\" -o /dev/null -w \"%{http_code} %{content_type}\" --max-time 2)",
+      "Bash(curl -s \"http://localhost:8000/cameras/camera_02/stream\" -o /dev/null -w \"%{http_code} %{content_type}\" --max-time 2)"
     ]
   }
 }

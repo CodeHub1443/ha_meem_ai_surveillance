@@ -751,11 +751,79 @@ def list_cameras():
         {
             "id": c.get("id"),
             "name": c.get("name"),
-            "active": bool(c.get("url")),
+            # Map YAML `url` → frontend `rtsp_url`; derive active from explicit field or URL presence
+            "rtsp_url": c.get("url") or "",
+            "active": c.get("active", bool(c.get("url"))),
             "roi": c.get("roi"),
         }
         for c in cameras
     ]
+
+
+class ROIUpdate(BaseModel):
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+class CameraPayload(BaseModel):
+    id: str
+    name: str
+    rtsp_url: str = ""
+    active: bool = True
+    roi: Optional[ROIUpdate] = None
+
+
+def _write_cameras_yaml(cameras: List[Dict]) -> None:
+    with open(CAMERAS_CONFIG, "w") as f:
+        yaml.safe_dump({"cameras": cameras}, f, default_flow_style=None, sort_keys=False)
+
+
+def _save_camera_roi(camera_id: str, roi: list) -> bool:
+    with open(CAMERAS_CONFIG) as f:
+        data = yaml.safe_load(f) or {}
+    for cam in data.get("cameras", []):
+        if cam["id"] == camera_id:
+            cam["roi"] = roi
+            break
+    else:
+        return False
+    _write_cameras_yaml(data.get("cameras", []))
+    return True
+
+
+@app.put("/cameras")
+def replace_cameras(cameras: List[CameraPayload]):
+    """Bulk-replace all cameras in cameras.yaml. Maps frontend fields to YAML format."""
+    cam_list: List[Dict] = []
+    for cam in cameras:
+        cam_list.append({
+            "id": cam.id,
+            "name": cam.name,
+            "url": cam.rtsp_url or None,   # frontend rtsp_url → YAML url
+            "active": cam.active,
+            "roi": [cam.roi.x1, cam.roi.y1, cam.roi.x2, cam.roi.y2] if cam.roi else None,
+        })
+    try:
+        _write_cameras_yaml(cam_list)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save cameras.yaml: {e}")
+    log.info("cameras.yaml replaced via API: %d camera(s)", len(cam_list))
+    return {"saved": len(cam_list)}
+
+
+@app.patch("/cameras/{camera_id}/roi")
+def update_camera_roi(camera_id: str, body: ROIUpdate):
+    roi = [body.x1, body.y1, body.x2, body.y2]
+    try:
+        found = _save_camera_roi(camera_id, roi)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save ROI: {e}")
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found")
+    log.info("[%s] ROI updated via API: %s", camera_id, roi)
+    return {"camera_id": camera_id, "roi": roi}
 
 
 @app.post("/cameras/{camera_id}/snapshot")
@@ -782,10 +850,16 @@ async def capture_snapshot(camera_id: str):
     if not ret or frame is None:
         raise HTTPException(status_code=503, detail="Could not read frame from camera stream")
 
+    h, w = frame.shape[:2]
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     img_b64 = base64.b64encode(buf.tobytes()).decode()
 
-    return {"image_base64": img_b64, "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "image_base64": img_b64,
+        "timestamp": datetime.utcnow().isoformat(),
+        "width": w,
+        "height": h,
+    }
 
 
 @app.get("/cameras/{camera_id}/stream-status")
@@ -804,6 +878,8 @@ async def stream_camera(camera_id: str):
     cam = next((c for c in cameras if c.get("id") == camera_id), None)
     if cam is None:
         raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found")
+    if not cam.get("url"):
+        raise HTTPException(status_code=503, detail=f"Camera '{camera_id}' has no RTSP URL configured")
 
     async def generate() -> AsyncGenerator[bytes, None]:
         last_jpeg: bytes = b""
