@@ -164,10 +164,6 @@ class CameraWorker:
         self.metrics = pipeline_metrics.get_or_create(self.camera_id)
         # Maps track_id → last emitted event type for flip detection
         self._track_last_event: dict = {}
-        # Best-quality frame seen per track: track_id → (resized_frame, quality_score)
-        # Used as snapshot so saved images show the sharpest frontal frame, not the
-        # decision frame (which may be a side profile when the aggregator first fires).
-        self._best_snap: dict = {}
         # Timestamp of last daily metric summary log
         self._last_metric_log_day: int = -1
 
@@ -219,13 +215,9 @@ class CameraWorker:
                     log.info(
                         f"[{self.camera_id}] EMIT DEFERRED UNKNOWN track={tid} (track lost)"
                     )
-                self._best_snap.pop(tid, None)
             self._logged_size_reject.discard(tid)
             self._logged_blur_reject.discard(tid)
 
-        # Purge best-snap entries for tracks OC-SORT dropped without going
-        # through aggregator expiry (e.g. never produced a valid embedding).
-        self._best_snap = {k: v for k, v in self._best_snap.items() if k in active_ids}
         self._logged_size_reject &= active_ids
         self._logged_blur_reject &= active_ids
 
@@ -308,13 +300,6 @@ class CameraWorker:
 
             valid_faces.append(face)
             valid_crops.append(aligned)
-
-            # Keep the highest-quality frame seen for this track as the snapshot.
-            if face.quality_score > self._best_snap.get(tid, (None, -1.0))[1]:
-                self._best_snap[tid] = (
-                    cv2.resize(frame, (_STREAM_WIDTH, _STREAM_HEIGHT)),
-                    face.quality_score,
-                )
 
         # ── 6. Batched recognition ────────────────────────────────────
         if valid_crops:
@@ -406,12 +391,9 @@ class CameraWorker:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
             )
 
-            # Use the best-quality frame seen for this track, not the current
-            # decision frame which may be a side profile or mid-motion blur.
-            snap_frame = self._best_snap.get(
-                face.track_id,
-                (cv2.resize(frame, (_STREAM_WIDTH, _STREAM_HEIGHT)), 0.0),
-            )[0]
+            # Resize to stream resolution once for snapshot/hold — avoids a ~6 MB
+            # full-res copy on the hot path (io_worker copies again inside submit).
+            snap_frame = cv2.resize(frame, (_STREAM_WIDTH, _STREAM_HEIGHT))
 
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
