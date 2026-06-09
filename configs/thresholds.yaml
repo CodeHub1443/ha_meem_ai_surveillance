@@ -31,3 +31,11 @@ quality:
   adaptive_blur: true
   adaptive_percentile: 20.0   # Set threshold at 20th percentile of observed scores
   adaptive_window: 500         # Number of recent scores to consider
+  min_pose_weight: 0.30        # Skip profile frames (pose_w floor = 0.10 = extreme profile)
+  min_stab: 0.15               # Skip tracking-contamination frames (stab < 0.15 = different person)
+
+# Diagnostic logging — per-frame scores for accuracy root-cause analysis
+# Produces [DIAG] and [DIAG DECISION] log lines at INFO level.
+# Disable in production once root cause is identified.
+diagnostic:
+  per_frame_logging: true

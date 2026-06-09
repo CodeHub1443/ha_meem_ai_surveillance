@@ -158,7 +158,7 @@ def main() -> set:
 
         print(
             f"  {person_id:25s} | raw images: {len(raw_embeddings):4d} "
-            f"→ prototypes: {len(gallery[person_id])}{note_str}"
+            f"-> prototypes: {len(gallery[person_id])}{note_str}"
         )
 
     output_path = Path(

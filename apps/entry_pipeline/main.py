@@ -39,6 +39,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+_log_dir = Path("logs")
+_log_dir.mkdir(parents=True, exist_ok=True)
+_fh = logging.FileHandler(_log_dir / "pipeline.log", encoding="utf-8")
+_fh.setLevel(logging.INFO)
+_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s"))
+logging.getLogger().addHandler(_fh)
 log = logging.getLogger("pipeline")
 
 
@@ -160,6 +166,15 @@ class CameraWorker:
         self._logged_size_reject: set = set()
         self._logged_blur_reject: set = set()
 
+        diag_cfg = config.get("diagnostic", {})
+        self._diag_enabled: bool = diag_cfg.get("per_frame_logging", False)
+        self._prev_embeddings: dict = {}   # track_id → last L2-normalized embedding (gate passes only)
+        self._frame_diag: dict = {}        # track_id → {"scores": list[float], "first_ts": float}
+
+        _quality_cfg = config.get("quality", {})
+        self._min_pose_w: float = _quality_cfg.get("min_pose_weight", 0.0)
+        self._min_stab: float = _quality_cfg.get("min_stab", 0.0)
+
         # Baseline metrics — Phase 0 instrumentation (no behaviour change)
         self.metrics = pipeline_metrics.get_or_create(self.camera_id)
         # Maps track_id → last emitted event type for flip detection
@@ -217,6 +232,8 @@ class CameraWorker:
                     )
             self._logged_size_reject.discard(tid)
             self._logged_blur_reject.discard(tid)
+            self._prev_embeddings.pop(tid, None)
+            self._frame_diag.pop(tid, None)
 
         self._logged_size_reject &= active_ids
         self._logged_blur_reject &= active_ids
@@ -279,6 +296,14 @@ class CameraWorker:
 
             face.blur_score = blur
             pw = pose_weight(face.kps) if face.kps is not None else 1.0
+
+            if self._min_pose_w > 0.0 and pw < self._min_pose_w:
+                log.debug(
+                    "[%s] track=%d SKIP: pose_w=%.2f < %.2f",
+                    self.camera_id, tid, pw, self._min_pose_w,
+                )
+                continue
+
             size_factor = min(face.width / 112.0, 1.0)
             face.quality_score = blur * face.confidence * pw * size_factor
 
@@ -305,7 +330,46 @@ class CameraWorker:
         if valid_crops:
             embeddings = self.models.recognizer.extract_embeddings_batch(valid_crops)
             for face, emb in zip(valid_faces, embeddings):
+                tid = face.track_id
+                prev_emb = self._prev_embeddings.get(tid)
+                cur_stab = float(np.dot(emb, prev_emb)) if prev_emb is not None else None
+
+                # Stability gate — skip tracking-contamination frames.
+                # Do NOT update _prev_embeddings on skip; next frame compares against
+                # the last clean embedding, not the contaminated one.
+                if cur_stab is not None and self._min_stab > 0.0 and cur_stab < self._min_stab:
+                    log.debug(
+                        "[%s] track=%d SKIP: stab=%.3f < %.2f (embedding jump)",
+                        self.camera_id, tid, cur_stab, self._min_stab,
+                    )
+                    continue  # face.embedding stays None → aggregator ignores it
+
                 face.embedding = emb
+                self._prev_embeddings[tid] = emb.copy()
+
+                if self._diag_enabled:
+                    top3 = self.models.face_db.match_diagnostics(emb, top_k=self.match_top_k)
+                    frame_margin = top3[0][1] - top3[1][1] if len(top3) >= 2 else 0.0
+                    diag_entry = self._frame_diag.setdefault(
+                        tid, {"scores": [], "identities": [], "first_ts": time.time()}
+                    )
+                    frame_num = len(diag_entry["scores"]) + 1
+                    diag_entry["scores"].append(top3[0][1] if top3 else 0.0)
+                    diag_entry["identities"].append(top3[0][0] if top3 else None)
+                    pw_val = pose_weight(face.kps) if face.kps is not None else 1.0
+                    top_str = "  ".join(
+                        f"{pid}:{sc:.3f}" for pid, sc in top3
+                    ) if top3 else "no_gallery"
+                    stab_str = f"{cur_stab:.3f}" if cur_stab is not None else "n/a"
+                    log.info(
+                        "[DIAG] cam=%s track=%d frame=%d"
+                        " face=%dx%d blur=%.1f quality=%.3f pose_w=%.2f"
+                        " | %s | margin=%.3f stab=%s",
+                        self.camera_id, tid, frame_num,
+                        int(face.width), int(face.height),
+                        face.blur_score, face.quality_score, pw_val,
+                        top_str, frame_margin, stab_str,
+                    )
 
         # ── 7. Aggregation + matching ─────────────────────────────────
         for face in valid_faces:
@@ -360,6 +424,45 @@ class CameraWorker:
                 emit_identity = identity
                 emit_event = "AUTHORIZED" if identity else "UNKNOWN"
 
+            if self._diag_enabled:
+                diag = self._frame_diag.get(face.track_id, {})
+                frame_scores = diag.get("scores", [])
+                elapsed = time.time() - diag.get("first_ts", time.time())
+                top3c = self.models.face_db.match_diagnostics(
+                    consensus, top_k=self.match_top_k
+                )
+                cons_margin = top3c[0][1] - top3c[1][1] if len(top3c) >= 2 else 0.0
+                best_f = max(frame_scores) if frame_scores else 0.0
+                avg_f = float(np.mean(frame_scores)) if frame_scores else 0.0
+                med_f = float(np.median(frame_scores)) if frame_scores else 0.0
+                top3c_str = "  ".join(
+                    f"{pid}:{sc:.3f}" for pid, sc in top3c
+                ) if top3c else "no_gallery"
+                id_seq = diag.get("identities", [])
+                id_switches = sum(
+                    1 for i in range(1, len(id_seq))
+                    if id_seq[i] is not None
+                    and id_seq[i - 1] is not None
+                    and id_seq[i] != id_seq[i - 1]
+                )
+                if emit_event == "UNKNOWN":
+                    reject_reason = "margin" if score >= self.similarity_threshold else "threshold"
+                else:
+                    reject_reason = "none"
+                log.info(
+                    "[DIAG DECISION] cam=%s track=%d frames=%d elapsed=%.2fs"
+                    " | consensus: %s | margin=%.3f"
+                    " | best_frame=%.3f avg_frame=%.3f median_frame=%.3f"
+                    " | id_switches=%d reject_reason=%s"
+                    " → %s (threshold=%.2f)",
+                    self.camera_id, face.track_id,
+                    len(frame_scores), elapsed,
+                    top3c_str, cons_margin,
+                    best_f, avg_f, med_f,
+                    id_switches, reject_reason,
+                    emit_event, self.similarity_threshold,
+                )
+
             # ── Baseline metrics for this decision ─────────────────────
             self.metrics.record_event(face.track_id)
             prev_event = self._track_last_event.get(face.track_id)
@@ -391,9 +494,7 @@ class CameraWorker:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
             )
 
-            # Resize to stream resolution once for snapshot/hold — avoids a ~6 MB
-            # full-res copy on the hot path (io_worker copies again inside submit).
-            snap_frame = cv2.resize(frame, (_STREAM_WIDTH, _STREAM_HEIGHT))
+            snap_frame = frame  # full-res — io_worker copies inside submit()
 
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
