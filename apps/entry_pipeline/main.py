@@ -114,10 +114,10 @@ class CameraWorker:
         )
         self.aggregator = EmbeddingAggregator(
             buffer_size=fusion_cfg.get("buffer_size", 10),
-            min_frames=2,
-            min_decision_seconds=fusion_cfg.get("min_decision_seconds", 0.5),
+            min_frames=fusion_cfg.get("min_frames", 5),
+            min_decision_seconds=fusion_cfg.get("min_decision_seconds", 2.0),
             recency_decay=fusion_cfg.get("recency_decay", 0.95),
-            expire_after_seconds=fusion_cfg.get("expire_after_seconds", 3.0),
+            expire_after_seconds=fusion_cfg.get("expire_after_seconds", 5.0),
         )
         self.blur_threshold = AdaptiveBlurThreshold(
             window_size=config.get("quality", {}).get("adaptive_window", 500),
