@@ -1,9 +1,9 @@
 # Detection and recognition thresholds
 detection:
-  confidence: 0.5
+  confidence: 0.4
 
 recognition:
-  similarity_threshold: 0.60
+  similarity_threshold: 0.52
   min_face_size: 80            # Minimum face width in pixels
   blur_threshold: 30           # Fallback for adaptive blur threshold
   upgrade_margin: 0.02         # Extra score above threshold to upgrade UNKNOWN → AUTHORIZED (lowered from 0.05)
@@ -20,8 +20,8 @@ fusion:
 
 # Multi-object tracking
 tracking:
-  iou_threshold: 0.3
-  max_age: 15                  # Frames a track coasts without detection (~1s at 15fps)
+  iou_threshold: 0.2
+  max_age: 30                  # Frames a track coasts without detection (~2s at 15fps)
 
 # Per-identity re-alert cooldown
 identity_cooldown_seconds: 6.0
