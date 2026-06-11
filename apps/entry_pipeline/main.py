@@ -182,6 +182,15 @@ class CameraWorker:
         # Timestamp of last daily metric summary log
         self._last_metric_log_day: int = -1
 
+        # Best-frame buffer: track_id → (quality_score, full_res_frame)
+        # Updated every frame that passes all quality gates; saved to raw_frames
+        # at decision time so gallery can be rebuilt from real runtime frames.
+        self._best_frames: dict = {}
+        dataset_cfg = config.get("dataset", {})
+        self._raw_frames_root = Path(
+            dataset_cfg.get("raw_frames", "dataset/raw_frames")
+        )
+
         self.running = False
 
         self._last_stream_ts: float = 0.0
@@ -234,6 +243,7 @@ class CameraWorker:
             self._logged_blur_reject.discard(tid)
             self._prev_embeddings.pop(tid, None)
             self._frame_diag.pop(tid, None)
+            self._best_frames.pop(tid, None)
 
         self._logged_size_reject &= active_ids
         self._logged_blur_reject &= active_ids
@@ -325,6 +335,13 @@ class CameraWorker:
 
             valid_faces.append(face)
             valid_crops.append(aligned)
+
+            # Keep the sharpest/most-frontal frame seen for this track.
+            # Saved to raw_frames at decision time instead of the decision frame
+            # (by which point the person may have already walked past the camera).
+            prev_best, _ = self._best_frames.get(tid, (-1.0, None))
+            if face.quality_score > prev_best:
+                self._best_frames[tid] = (face.quality_score, frame.copy())
 
         # ── 6. Batched recognition ────────────────────────────────────
         if valid_crops:
@@ -463,6 +480,20 @@ class CameraWorker:
                     emit_event, self.similarity_threshold,
                 )
 
+                if emit_event == "AUTHORIZED":
+                    diag_class = "AUTHORIZED"
+                elif id_switches <= 2 and best_f >= 0.40:
+                    diag_class = "LOW_CONFIDENCE_MATCH"
+                else:
+                    diag_class = "NO_STABLE_MATCH"
+                candidate = top3c[0][0] if top3c else "none"
+                log.info(
+                    "[DIAG CLASS] cam=%s track=%d state=%s"
+                    " best=%.3f switches=%d consensus=%.3f candidate=%s",
+                    self.camera_id, face.track_id, diag_class,
+                    best_f, id_switches, score, candidate,
+                )
+
             # ── Baseline metrics for this decision ─────────────────────
             self.metrics.record_event(face.track_id)
             prev_event = self._track_last_event.get(face.track_id)
@@ -495,6 +526,11 @@ class CameraWorker:
             )
 
             snap_frame = frame  # full-res — io_worker copies inside submit()
+
+            # Save the best-quality runtime frame to raw_frames for gallery use.
+            # This is the clearest frame from when the person was mid-traversal,
+            # not the decision frame (often their back or an empty spot).
+            self._save_gallery_frame(face.track_id, emit_identity, emit_event)
 
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
@@ -531,6 +567,31 @@ class CameraWorker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         return annotated
+
+    def _save_gallery_frame(self, tid: int, identity: Optional[str], event: str) -> None:
+        """Save the best-quality buffered frame to raw_frames for gallery rebuilding.
+
+        AUTHORIZED → raw_frames/<identity>/
+        UNKNOWN    → raw_frames/_unknowns/<camera_id>/
+        """
+        entry = self._best_frames.pop(tid, None)
+        if entry is None:
+            return
+        _, best_frame = entry
+
+        if event == "AUTHORIZED" and identity:
+            out_dir = self._raw_frames_root / identity
+        else:
+            out_dir = self._raw_frames_root / "_unknowns" / self.camera_id
+
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            filename = f"{ts}_{self.camera_id}_t{tid}.jpg"
+            cv2.imwrite(str(out_dir / filename), best_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            log.debug("[%s] gallery frame saved: %s/%s", self.camera_id, out_dir.name, filename)
+        except Exception as exc:
+            log.warning("[%s] gallery frame save failed: %s", self.camera_id, exc)
 
     # ------------------------------------------------------------------
     # Thread entry point
@@ -685,6 +746,7 @@ def run_pipeline():
         "configs/default.yaml",
         "configs/thresholds.yaml",
         "configs/tensorrt.yaml",
+        "configs/dataset.yaml",
     )
     try:
         with open("configs/cameras.yaml") as f:

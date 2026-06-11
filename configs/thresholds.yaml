@@ -14,7 +14,7 @@ recognition:
 fusion:
   buffer_size: 10              # Sliding window of frames per track
   min_frames: 5                # Min successfully-aligned frames before first decision
-  min_decision_seconds: 2.0    # Wait 2s before deciding — gives time to clear the curtain and face camera
+  min_decision_seconds: 0.8    # Camera delivers ~13fps; workers visible ~1-1.2s; need margin below that
   recency_decay: 0.95          # Exponential weight decay (1.0 = no decay)
   expire_after_seconds: 5.0    # Aggregator buffer expiry (identity state protected by Phase 1 guard)
 
@@ -31,7 +31,7 @@ quality:
   adaptive_blur: true
   adaptive_percentile: 20.0   # Set threshold at 20th percentile of observed scores
   adaptive_window: 500         # Number of recent scores to consider
-  min_pose_weight: 0.30        # Skip profile frames (pose_w floor = 0.10 = extreme profile)
+  min_pose_weight: 0.20        # Skip profile frames (pose_w floor = 0.10 = extreme profile)
   min_stab: 0.15               # Skip tracking-contamination frames (stab < 0.15 = different person)
 
 # Diagnostic logging — per-frame scores for accuracy root-cause analysis
