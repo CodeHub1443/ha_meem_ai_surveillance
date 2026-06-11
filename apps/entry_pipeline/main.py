@@ -480,6 +480,21 @@ class CameraWorker:
                     emit_event, self.similarity_threshold,
                 )
 
+                # Sorted per-frame scores (descending) to reveal score distribution:
+                # Reality A = many scores above threshold (aggregator is the bottleneck)
+                # Reality B = one high score, rest low (per-frame matching needed)
+                # Reality C = a few high scores, rest low (quality-filtered top-K)
+                if frame_scores:
+                    sorted_scores = sorted(frame_scores, reverse=True)
+                    top10_str = " ".join(f"{s:.3f}" for s in sorted_scores[:10])
+                    above_thresh = sum(1 for s in frame_scores if s >= self.similarity_threshold)
+                    log.info(
+                        "[DIAG SCORES] cam=%s track=%d total_frames=%d above_threshold=%d"
+                        " | top10: %s",
+                        self.camera_id, face.track_id,
+                        len(frame_scores), above_thresh, top10_str,
+                    )
+
                 if emit_event == "AUTHORIZED":
                     diag_class = "AUTHORIZED"
                 elif id_switches <= 2 and best_f >= 0.40:

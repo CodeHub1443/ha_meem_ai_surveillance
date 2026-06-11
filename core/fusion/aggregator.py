@@ -29,6 +29,7 @@ class EmbeddingAggregator:
         min_decision_seconds: float = 0.5,
         recency_decay: float = 0.95,
         expire_after_seconds: float = 3.0,
+        best_anchor_weight: float = 0.0,
     ):
         """
         Args:
@@ -41,15 +42,17 @@ class EmbeddingAggregator:
                 Set to 1.0 to disable recency weighting.
             expire_after_seconds: Remove a track buffer if it has not
                 received an update in this many seconds.
+            best_anchor_weight: Reserved for future use; currently unused.
         """
         self.buffer_size = buffer_size
         self.min_frames = min_frames
         self.min_decision_seconds = min_decision_seconds
         self.recency_decay = recency_decay
         self.expire_after_seconds = expire_after_seconds
+        self.best_anchor_weight = best_anchor_weight
 
         # track_id → {entries, first_seen, last_updated}
-        # entries: list of (embedding, blur_score, timestamp)
+        # entries: list of (embedding, quality_score, timestamp)
         self.track_buffers: Dict[int, Dict] = {}
         self._lock = threading.Lock()
 
@@ -146,7 +149,7 @@ class EmbeddingAggregator:
                 del self.track_buffers[tid]
         return stale
 
-    def clear_track(self, track_id: int):
+    def clear_track(self, track_id: int) -> None:
         """Explicitly remove a single track's buffer."""
         with self._lock:
             self.track_buffers.pop(track_id, None)
