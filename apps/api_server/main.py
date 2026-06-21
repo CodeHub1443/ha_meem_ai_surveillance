@@ -246,6 +246,52 @@ class PersonUpdate(BaseModel):
     working_area: Optional[str] = None
 
 
+class AuditSighting(BaseModel):
+    timestamp: str
+    camera_id: str
+    direction: str  # "entry" | "exit"
+
+
+class AuthorizedPersonAudit(BaseModel):
+    identity: str
+    first_entry_camera: Optional[str] = None
+    first_entry_time: Optional[str] = None
+    last_exit_camera: Optional[str] = None
+    last_exit_time: Optional[str] = None
+    status: str  # "inside" | "exited"
+    all_sightings: List[AuditSighting]
+
+
+class AuditSummary(BaseModel):
+    total_unique_persons: int
+    total_unique_authorized: int
+    total_unique_unauthorized: int
+    authorized_currently_inside: int
+    unknown_currently_inside: int
+
+
+class UnknownSummary(BaseModel):
+    entry_count: int
+    exit_count: int
+    net_inside: int
+    unique_clusters: int
+    entry_cameras: Dict[str, int]
+    exit_cameras: Dict[str, int]
+
+
+class AuditWindow(BaseModel):
+    since: str
+    until: str
+
+
+class AuditReport(BaseModel):
+    generated_at: str
+    window: AuditWindow
+    summary: AuditSummary
+    authorized_persons: List[AuthorizedPersonAudit]
+    unknown_summary: UnknownSummary
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -453,6 +499,118 @@ def get_pipeline_metrics():
         "cameras": _pipeline_metrics.all_snapshots(),
         "io_dropped_events": _io_worker.get_dropped_count(),
     }
+
+
+# ── Audit (point-in-time room occupancy report) ────────────────────────────────
+
+# camera_01/camera_03 face the entry side of each gate, camera_02/camera_04 the
+# exit side — mirrors the physical layout in cameras.yaml.
+ENTRY_CAMERAS = {"camera_01", "camera_03"}
+EXIT_CAMERAS = {"camera_02", "camera_04"}
+
+
+def _compute_audit_report(since: str, until: str) -> Dict[str, Any]:
+    conn = _event_store._conn()
+
+    rows = conn.execute(
+        """SELECT timestamp, camera_id, identity FROM events
+           WHERE event_type = 'AUTHORIZED' AND identity IS NOT NULL
+             AND timestamp >= ? AND timestamp <= ?
+           ORDER BY identity, timestamp ASC""",
+        (since, until),
+    ).fetchall()
+
+    sightings_by_identity: Dict[str, List[Dict]] = {}
+    for r in rows:
+        camera_id = r["camera_id"]
+        if camera_id in ENTRY_CAMERAS:
+            direction = "entry"
+        elif camera_id in EXIT_CAMERAS:
+            direction = "exit"
+        else:
+            continue  # camera not mapped to either side of a gate
+        sightings_by_identity.setdefault(r["identity"], []).append({
+            "timestamp": r["timestamp"],
+            "camera_id": camera_id,
+            "direction": direction,
+        })
+
+    authorized_persons = []
+    for identity, sightings in sightings_by_identity.items():
+        first_entry = next((s for s in sightings if s["direction"] == "entry"), None)
+        last_exit = next((s for s in reversed(sightings) if s["direction"] == "exit"), None)
+        status = "exited" if sightings[-1]["direction"] == "exit" else "inside"
+        authorized_persons.append({
+            "identity": identity,
+            "first_entry_camera": first_entry["camera_id"] if first_entry else None,
+            "first_entry_time": first_entry["timestamp"] if first_entry else None,
+            "last_exit_camera": last_exit["camera_id"] if last_exit else None,
+            "last_exit_time": last_exit["timestamp"] if last_exit else None,
+            "status": status,
+            "all_sightings": sightings,
+        })
+    authorized_persons.sort(key=lambda p: p["identity"])
+    authorized_currently_inside = sum(1 for p in authorized_persons if p["status"] == "inside")
+
+    unknown_rows = conn.execute(
+        """SELECT camera_id, COUNT(*) AS cnt FROM events
+           WHERE event_type = 'UNKNOWN' AND timestamp >= ? AND timestamp <= ?
+           GROUP BY camera_id""",
+        (since, until),
+    ).fetchall()
+
+    entry_cameras: Dict[str, int] = {}
+    exit_cameras: Dict[str, int] = {}
+    for r in unknown_rows:
+        if r["camera_id"] in ENTRY_CAMERAS:
+            entry_cameras[r["camera_id"]] = r["cnt"]
+        elif r["camera_id"] in EXIT_CAMERAS:
+            exit_cameras[r["camera_id"]] = r["cnt"]
+    entry_count = sum(entry_cameras.values())
+    exit_count = sum(exit_cameras.values())
+    net_inside = max(0, entry_count - exit_count)
+
+    # Unique unknown individuals come from the same clustering data the Debug
+    # module shows — None means clustering has never been run.
+    unique_clusters = _event_store.count_unique_unauthorized(since=since, until=until) or 0
+
+    total_unique_authorized = len(authorized_persons)
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "window": {"since": since, "until": until},
+        "summary": {
+            "total_unique_persons": total_unique_authorized + unique_clusters,
+            "total_unique_authorized": total_unique_authorized,
+            "total_unique_unauthorized": unique_clusters,
+            "authorized_currently_inside": authorized_currently_inside,
+            "unknown_currently_inside": net_inside,
+        },
+        "authorized_persons": authorized_persons,
+        "unknown_summary": {
+            "entry_count": entry_count,
+            "exit_count": exit_count,
+            "net_inside": net_inside,
+            "unique_clusters": unique_clusters,
+            "entry_cameras": entry_cameras,
+            "exit_cameras": exit_cameras,
+        },
+    }
+
+
+@app.get("/audit/report", response_model=AuditReport)
+def get_audit_report(
+    since: Optional[str] = Query(default=None, description="ISO timestamp, defaults to today 00:00"),
+    until: Optional[str] = Query(default=None, description="ISO timestamp, defaults to now"),
+):
+    # Event timestamps are written with the pipeline's local clock
+    # (datetime.now() in entry_pipeline/main.py), so the "today" window must
+    # use local time too — UTC would cut off events stamped ahead of UTC now.
+    if not since:
+        since = f"{datetime.now():%Y-%m-%d}T00:00:00"
+    if not until:
+        until = datetime.now().isoformat()
+    return _compute_audit_report(since, until)
 
 
 # ── Clustering ─────────────────────────────────────────────────────────────────
