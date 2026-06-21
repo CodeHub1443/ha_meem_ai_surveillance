@@ -91,7 +91,31 @@
       "Bash(ls \"C:/Users/acer/Desktop/TDI/Ha-meem/FR/Face_images/raw_frames/\" | head -20 && echo \"---\" && ls \"C:/Users/acer/Desktop/TDI/Ha-meem/FR/Face_images/raw_frames/\" | wc -l)",
       "Read(//c/Users/acer/Desktop/TDI/Ha-meem/FR/Face_images/raw_frames/**)",
       "Bash(python apps/dataset_tools/extract_faces.py)",
-      "Bash(python apps/dataset_tools/build_gallery.py)"
+      "Bash(python apps/dataset_tools/build_gallery.py)",
+      "Bash(awk '/2026-06-10 07:51:51/{found=1} found && /DIAG DECISION/' \"c:/Users/acer/Desktop/TDI/Ha-meem/FR/ha_meem_ai_surveillance/logs/pipeline.log\")",
+      "Bash(awk '/2026-06-10 07:51:51/{found=1} found && /DIAG DECISION/ && /AUTHORIZED/' c:/Users/acer/Desktop/TDI/Ha-meem/FR/ha_meem_ai_surveillance/logs/pipeline.log)",
+      "Bash(awk '/2026-06-10 07:51:51/{found=1} found && /\\\\[DIAG\\\\]/' c:/Users/acer/Desktop/TDI/Ha-meem/FR/ha_meem_ai_surveillance/logs/pipeline.log)",
+      "Bash(measure -line)",
+      "Bash(python -m py_compile apps/api_server/main.py)",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('src/i18n/locales/en.json','utf8'\\)\\); JSON.parse\\(require\\('fs'\\).readFileSync\\('src/i18n/locales/bn.json','utf8'\\)\\); console.log\\('JSON OK'\\)\")",
+      "Bash(npm run *)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:8080/audit -o /tmp/audit_page.html -w \"%{http_code}\\\\n\")",
+      "Bash(python -c \"import fastapi, uvicorn, cv2, onnxruntime\")",
+      "Bash(curl -s http://127.0.0.1:8000/audit/report)",
+      "Bash(curl -s \"http://127.0.0.1:8000/audit/report?since=2026-03-01T00:00:00&until=2026-06-15T00:00:00\")",
+      "Bash(curl -s -o /dev/null -w \"frontend status: %{http_code}\\\\n\" http://localhost:8080/audit)",
+      "Bash(curl -s -o /dev/null -w \"backend status: %{http_code}\\\\n\" \"http://127.0.0.1:8000/audit/report\")",
+      "Bash(pkill -f \"vite dev\")",
+      "Bash(pkill -f \"uvicorn apps.api_server.main\")",
+      "Bash(netstat -ano)",
+      "Bash(tasklist //FI \"PID eq 22132\" //FI \"PID eq 37140\" //FI \"PID eq 6028\" //FI \"PID eq 19164\" //FO LIST)",
+      "PowerShell(Get-Process -Id 22132,37140,6028,19164 -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"ProcessId=22132 or ProcessId=37140 or ProcessId=6028 or ProcessId=19164\")",
+      "Bash(curl -s \"http://127.0.0.1:8002/audit/report\")",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"CommandLine LIKE '%--port 8002%'\\\\\" | Select-Object ProcessId\")",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"ProcessId=31120 or ProcessId=30216 or ProcessId=5536 or ProcessId=36672 or ProcessId=39572 or ProcessId=35024\")",
+      "Bash(python apps/dataset_tools/analyze_snapshots.py --snapshots \"snapshots/2026-06-21\" --out \"snapshot_analysis_0621.txt\")"
     ]
   }
 }

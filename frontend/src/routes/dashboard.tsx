@@ -88,7 +88,7 @@ function DashboardPage() {
               <EmptyState title={t("events.noneTitle")} body={t("events.noneBody")} />
             ) : (
               <div className="divide-y">
-                {latest.data.slice(0, 10).map((e, i) => (
+                {latest.data.map((e, i) => (
                   <div key={i} className={`flex items-center gap-3 py-3 ${e.event === "UNKNOWN" ? "border-l-2 border-l-danger -ml-5 pl-5" : ""}`}>
                     <div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center text-muted-foreground text-xs shrink-0">
                       {(e.identity || "?").slice(0, 2).toUpperCase()}

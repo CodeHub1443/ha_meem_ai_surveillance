@@ -540,12 +540,15 @@ class CameraWorker:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
             )
 
-            snap_frame = frame  # full-res — io_worker copies inside submit()
+            # Use the sharpest/most-frontal frame seen for this track instead of
+            # the live decision frame, which is often their back or an empty
+            # spot by the time enough frames have accumulated for a decision.
+            best_entry = self._best_frames.pop(face.track_id, None)
+            best_frame = best_entry[1] if best_entry is not None else None
+            snap_frame = best_frame if best_frame is not None else frame  # full-res — io_worker copies inside submit()
 
-            # Save the best-quality runtime frame to raw_frames for gallery use.
-            # This is the clearest frame from when the person was mid-traversal,
-            # not the decision frame (often their back or an empty spot).
-            self._save_gallery_frame(face.track_id, emit_identity, emit_event)
+            # Save the same best-quality frame to raw_frames for gallery use.
+            self._save_gallery_frame(best_frame, face.track_id, emit_identity, emit_event)
 
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
@@ -583,16 +586,16 @@ class CameraWorker:
 
         return annotated
 
-    def _save_gallery_frame(self, tid: int, identity: Optional[str], event: str) -> None:
+    def _save_gallery_frame(
+        self, best_frame, tid: int, identity: Optional[str], event: str
+    ) -> None:
         """Save the best-quality buffered frame to raw_frames for gallery rebuilding.
 
         AUTHORIZED → raw_frames/<identity>/
         UNKNOWN    → raw_frames/_unknowns/<camera_id>/
         """
-        entry = self._best_frames.pop(tid, None)
-        if entry is None:
+        if best_frame is None:
             return
-        _, best_frame = entry
 
         if event == "AUTHORIZED" and identity:
             out_dir = self._raw_frames_root / identity

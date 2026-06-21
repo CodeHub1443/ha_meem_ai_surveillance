@@ -85,17 +85,29 @@ def _load_aligned_faces_dir() -> str:
 ALIGNED_FACES_DIR = _load_aligned_faces_dir()
 
 
+_cameras_cache: Optional[List[Dict]] = None
+_cameras_mtime: float = 0.0
+_cameras_lock = threading.Lock()
+
+
 def _load_cameras() -> List[Dict]:
+    global _cameras_cache, _cameras_mtime
     try:
-        with open(CAMERAS_CONFIG) as f:
-            cfg = yaml.safe_load(f) or {}
-        return cfg.get("cameras", [])
-    except FileNotFoundError:
+        mtime = os.path.getmtime(CAMERAS_CONFIG)
+    except OSError:
         log.warning("cameras.yaml not found at %s", CAMERAS_CONFIG)
         return []
-    except Exception as e:
-        log.error("Failed to load cameras config: %s", e)
-        return []
+    with _cameras_lock:
+        if _cameras_cache is None or mtime != _cameras_mtime:
+            try:
+                with open(CAMERAS_CONFIG) as f:
+                    cfg = yaml.safe_load(f) or {}
+                _cameras_cache = cfg.get("cameras", [])
+                _cameras_mtime = mtime
+            except Exception as e:
+                log.error("Failed to load cameras config: %s", e)
+                return []
+        return _cameras_cache
 
 
 def _capture_frame(rtsp_url: str):
@@ -767,7 +779,19 @@ def create_person(
     # The old re.sub(r"[^a-z0-9_]") stripped Unicode letters, turning Bengali
     # names like "রাহেলা" into "person" and causing silent ID collisions.
     person_id = make_person_id(name)
-    if _person_store.exists(person_id):
+
+    # Claim the DB row first — the UNIQUE constraint is the sole arbiter of a
+    # name collision. Only the winner of a concurrent race proceeds to write
+    # image files, so two requests for the same name can never interleave
+    # uploads into the same directory.
+    try:
+        person_id = _person_store.create(
+            name=name,
+            employee_id=employee_id or None,
+            designation=designation or None,
+            working_area=working_area or None,
+        )
+    except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
 
     # Save uploaded face images to aligned_faces dir
@@ -785,16 +809,8 @@ def create_person(
         if thumbnail_url is None:
             thumbnail_url = f"/faces/{person_id}/{dest.name}"
 
-    try:
-        person_id = _person_store.create(
-            name=name,
-            employee_id=employee_id or None,
-            designation=designation or None,
-            working_area=working_area or None,
-            thumbnail_url=thumbnail_url,
-        )
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
+    if thumbnail_url:
+        _person_store.set_thumbnail(person_id, thumbnail_url)
 
     p = _person_store.get(person_id)
     return _enrich_persons([p])[0]
