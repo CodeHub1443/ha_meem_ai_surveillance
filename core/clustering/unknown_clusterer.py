@@ -18,7 +18,12 @@ Algorithm
      intermediate embeddings.
 4. Post-process: clusters smaller than min_cluster_size → singleton (-1).
    Renumber remaining clusters 0, 1, 2, ...
-5. Write cluster labels back to unknown_embeddings and record run metadata.
+5. Namespace labels by the run's start date before writing back (see
+   _date_bucket) — labels are renumbered from 0 on every run, so without
+   this, cluster_id=0 from two different days' runs would be indistinguishable
+   and a multi-day COUNT(DISTINCT cluster_id) would silently merge unrelated
+   people who happen to share a label number.
+6. Write cluster labels back to unknown_embeddings and record run metadata.
 
 Unique unauthorized count = n_distinct_clusters + n_singleton_tracks.
 
@@ -37,6 +42,28 @@ import numpy as np
 from core.database.event_store import EventStore
 
 log = logging.getLogger(__name__)
+
+_BUCKET_MULTIPLIER = 1_000_000  # headroom per day — far more than one gate could ever produce
+
+
+def _date_bucket(since: Optional[str]) -> int:
+    """Stable per-day namespace for cluster_id.
+
+    Cluster labels are renumbered 0, 1, 2... fresh on every run. Without a
+    namespace, cluster_id=0 from today's run and cluster_id=0 from
+    yesterday's run are unrelated groups of people sharing a label — any
+    query spanning both runs (a multi-day audit window, a date-range filter)
+    would have COUNT(DISTINCT cluster_id) silently merge them, undercounting.
+    Falls back to bucket 0 if no date scope was given — there's only one
+    namespace to collide with in that case, so the un-namespaced numbers
+    stay readable.
+    """
+    if not since:
+        return 0
+    try:
+        return int(since[:10].replace("-", ""))
+    except ValueError:
+        return 0
 
 
 def run_clustering(
@@ -170,10 +197,16 @@ def run_clustering(
     )
 
     # ── Write results back ───────────────────────────────────────────────────
+    # Namespace cluster_id by the run's date so labels from different runs
+    # never collide (see _date_bucket). Singletons stay -1 — they're already
+    # keyed by (camera_id, track_id) wherever they're counted/displayed, not
+    # by this value, so no namespace is needed for them.
+    bucket = _date_bucket(since)
     updates = []
     for tid, label in zip(track_ids, labels.tolist()):
+        cluster_id = bucket * _BUCKET_MULTIPLIER + label if label >= 0 else -1
         for db_id in track_groups[tid]["db_ids"]:
-            updates.append((db_id, int(label)))
+            updates.append((db_id, int(cluster_id)))
 
     store.update_cluster_results(
         updates,

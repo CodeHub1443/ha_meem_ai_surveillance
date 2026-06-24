@@ -41,27 +41,6 @@ def pose_weight(kps: np.ndarray) -> float:
     return float(max(0.1, 1.0 - nose_offset * 1.8))
 
 
-def landmark_fit_residual(kps: np.ndarray, image_size: int = 112) -> float:
-    """Mean reprojection error (pixels, canonical image_size-scale) after fitting
-    the detected 5-point landmarks to the ArcFace reference via a similarity
-    transform (rotation + uniform scale + translation only — no shear).
-
-    A real face's landmarks conform tightly to this canonical geometry. A
-    spurious detection (e.g. SCRFD locking onto symmetric-looking fabric folds
-    or shadow patterns) usually does not, even when *some* affine solution
-    exists, because a similarity-only fit has no shear term to absorb the
-    mismatch. Returns ``float('inf')`` if no transform could be estimated.
-    """
-    ref = _ARCFACE_REF_KEYPOINTS * (image_size / 112.0)
-    M, _ = cv2.estimateAffinePartial2D(
-        kps.astype(np.float32), ref, method=cv2.LMEDS
-    )
-    if M is None:
-        return float("inf")
-    projected = cv2.transform(kps.astype(np.float32).reshape(-1, 1, 2), M).reshape(-1, 2)
-    return float(np.linalg.norm(projected - ref, axis=1).mean())
-
-
 def align_face(
     image: np.ndarray,
     kps: np.ndarray,
