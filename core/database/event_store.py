@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -5,6 +6,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 DB_PATH = "logs/events.db"
 
@@ -76,7 +79,7 @@ class EventStore:
                 camera_id  TEXT NOT NULL,
                 timestamp  TEXT NOT NULL,
                 snapshot   TEXT,
-                embedding  BLOB NOT NULL,
+                embedding  BLOB,
                 cluster_id INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_uemb_ts    ON unknown_embeddings(timestamp);
@@ -93,6 +96,47 @@ class EventStore:
             );
         """)
         conn.commit()
+        self._migrate_embedding_nullable()
+
+    def _migrate_embedding_nullable(self):
+        """One-time fix for DBs created before this column was nullable.
+
+        embedding was originally declared BLOB NOT NULL, which made every
+        call to prune_clustered_embeddings() raise IntegrityError (silently
+        swallowed by the caller) — the BLOB was never actually freed after
+        clustering, so every embedding ever computed was retained forever.
+        SQLite can't drop a column constraint in place, so rebuild the table.
+        """
+        conn = self._conn()
+        col = next(
+            (r for r in conn.execute("PRAGMA table_info(unknown_embeddings)") if r["name"] == "embedding"),
+            None,
+        )
+        if col is None or not col["notnull"]:
+            return  # fresh DB (already nullable) or table not created yet
+        conn.executescript("""
+            CREATE TABLE unknown_embeddings_migrated (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id   INTEGER NOT NULL,
+                camera_id  TEXT NOT NULL,
+                timestamp  TEXT NOT NULL,
+                snapshot   TEXT,
+                embedding  BLOB,
+                cluster_id INTEGER
+            );
+            INSERT INTO unknown_embeddings_migrated
+                (id, track_id, camera_id, timestamp, snapshot, embedding, cluster_id)
+                SELECT id, track_id, camera_id, timestamp, snapshot, embedding, cluster_id
+                FROM unknown_embeddings;
+            DROP TABLE unknown_embeddings;
+            ALTER TABLE unknown_embeddings_migrated RENAME TO unknown_embeddings;
+            CREATE INDEX IF NOT EXISTS idx_uemb_ts    ON unknown_embeddings(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_uemb_cam   ON unknown_embeddings(camera_id);
+            CREATE INDEX IF NOT EXISTS idx_uemb_cid   ON unknown_embeddings(cluster_id);
+            CREATE INDEX IF NOT EXISTS idx_uemb_track ON unknown_embeddings(track_id);
+        """)
+        conn.commit()
+        log.info("Migrated unknown_embeddings.embedding to nullable — prune_clustered_embeddings() can now succeed.")
 
     # ── Write ──────────────────────────────────────────────────────────────────
 
@@ -234,36 +278,77 @@ class EventStore:
         conn.commit()
         return cur.lastrowid
 
-    def get_all_unknown_embeddings(self, days: int = 90) -> List[Dict]:
-        """Return embeddings within the rolling window (default 90 days).
+    def get_all_unknown_embeddings(
+        self, since: Optional[str] = None, until: Optional[str] = None
+    ) -> List[Dict]:
+        """Return embeddings with timestamp in [since, until] (all rows if neither given).
 
-        Caps the in-memory load fed to clustering — AgglomerativeClustering is
-        O(n²) so unbounded growth makes it unusable. Older rows stay in the DB
-        for audit purposes but are excluded from clustering runs.
+        Callers should pass a bounded window — AgglomerativeClustering is
+        O(n²), so feeding it unbounded history makes a run unusable. The API
+        defaults clustering to "today" for this reason.
+
+        Excludes rows whose embedding has already been pruned (see
+        prune_clustered_embeddings) — those rows already have a final
+        cluster_id from a previous run and have no vector left to cluster.
         """
+        clauses: List[str] = ["embedding IS NOT NULL"]
+        params: List = []
+        if since:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        where = "WHERE " + " AND ".join(clauses)
         rows = self._conn().execute(
-            """SELECT id, track_id, camera_id, timestamp, embedding
-               FROM unknown_embeddings
-               WHERE timestamp >= datetime('now', ?)
-               ORDER BY timestamp DESC""",
-            (f"-{days} days",),
+            f"""SELECT id, track_id, camera_id, timestamp, embedding
+                FROM unknown_embeddings
+                {where}
+                ORDER BY timestamp DESC""",
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def count_unknown_embeddings(self) -> int:
-        return self._conn().execute("SELECT COUNT(*) FROM unknown_embeddings").fetchone()[0]
+    def count_unknown_embeddings(
+        self, since: Optional[str] = None, until: Optional[str] = None
+    ) -> int:
+        clauses: List[str] = []
+        params: List = []
+        if since:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        return self._conn().execute(f"SELECT COUNT(*) FROM unknown_embeddings {where}", params).fetchone()[0]
 
-    def prune_clustered_embeddings(self) -> int:
-        """Null-out embedding BLOBs for rows that already have a cluster label.
+    def prune_clustered_embeddings(self, before: Optional[str] = None) -> int:
+        """Null-out embedding BLOBs for already-clustered rows older than `before`.
 
         Rows are kept for audit (track_id / camera_id / timestamps stay intact)
-        but the 2 KB per-row BLOB is freed.  Safe to call after every clustering
-        run.  Returns the number of rows updated.
+        but the 2 KB per-row BLOB is freed.
+
+        `before` must exclude the window that's still being (re-)clustered —
+        operators re-run clustering on "today" repeatedly (e.g. to retune
+        distance_threshold), and get_all_unknown_embeddings() can't feed a
+        NULL embedding into AgglomerativeClustering. Pruning only rows
+        strictly before the active window means a same-day re-run never
+        crashes, while data from previous days still gets freed once
+        clustering moves on. The caller (_run_clustering_bg) passes the
+        window's `since` as `before`.
         """
         conn = self._conn()
-        cur = conn.execute(
-            "UPDATE unknown_embeddings SET embedding = NULL WHERE cluster_id IS NOT NULL AND embedding IS NOT NULL"
-        )
+        if before:
+            cur = conn.execute(
+                "UPDATE unknown_embeddings SET embedding = NULL "
+                "WHERE cluster_id IS NOT NULL AND embedding IS NOT NULL AND timestamp < ?",
+                (before,),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE unknown_embeddings SET embedding = NULL WHERE cluster_id IS NOT NULL AND embedding IS NOT NULL"
+            )
         conn.commit()
         return cur.rowcount
 
@@ -312,8 +397,19 @@ class EventStore:
         ).fetchone()
         return dict(row) if row else None
 
-    def get_cluster_groups(self, max_snapshots: int = 4) -> dict:
+    def get_cluster_groups(
+        self,
+        max_snapshots: int = 4,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+    ) -> dict:
         """Return clusters and singletons with sample snapshots for visual verification.
+
+        since/until must match the window the clustering run used to assign
+        cluster_id — labels are renumbered 0, 1, 2... on every run, so
+        cluster_id=0 from today and cluster_id=0 from a different day's run
+        refer to unrelated groups of people. Mixing windows here would join
+        snapshots/cameras across runs that don't share label semantics.
 
         Returns:
           {
@@ -324,24 +420,34 @@ class EventStore:
         """
         conn = self._conn()
 
+        date_clauses: List[str] = []
+        date_params: List = []
+        if since:
+            date_clauses.append("timestamp >= ?")
+            date_params.append(since)
+        if until:
+            date_clauses.append("timestamp <= ?")
+            date_params.append(until)
+        date_sql = "".join(f" AND {c}" for c in date_clauses)
+
         # ── Named clusters (cluster_id >= 0) ──────────────────────────────────
-        cluster_rows = conn.execute("""
+        cluster_rows = conn.execute(f"""
             SELECT cluster_id,
                    COUNT(DISTINCT track_id) AS track_count,
                    MIN(timestamp)           AS first_seen,
                    MAX(timestamp)           AS last_seen,
                    GROUP_CONCAT(DISTINCT camera_id) AS cameras
             FROM   unknown_embeddings
-            WHERE  cluster_id >= 0
+            WHERE  cluster_id >= 0{date_sql}
             GROUP  BY cluster_id
             ORDER  BY track_count DESC, cluster_id
-        """).fetchall()
+        """, date_params).fetchall()
 
         # Up to max_snapshots non-null snapshots per cluster (most recent first).
         # ROW_NUMBER() requires SQLite ≥ 3.25.0.  Fall back to a Python-side
         # grouping pass on older versions (e.g. system SQLite on some Linuxes).
         if _sqlite_ver >= (3, 25, 0):
-            snap_rows = conn.execute("""
+            snap_rows = conn.execute(f"""
                 WITH ranked AS (
                     SELECT cluster_id, snapshot,
                            ROW_NUMBER() OVER (
@@ -349,18 +455,18 @@ class EventStore:
                                ORDER BY timestamp DESC
                            ) AS rn
                     FROM unknown_embeddings
-                    WHERE cluster_id >= 0 AND snapshot IS NOT NULL
+                    WHERE cluster_id >= 0 AND snapshot IS NOT NULL{date_sql}
                 )
                 SELECT cluster_id, snapshot FROM ranked WHERE rn <= ?
-            """, (max_snapshots,)).fetchall()
+            """, date_params + [max_snapshots]).fetchall()
         else:
             # Fallback: fetch all snapshots, truncate in Python.
-            all_snaps = conn.execute("""
+            all_snaps = conn.execute(f"""
                 SELECT cluster_id, snapshot
                 FROM unknown_embeddings
-                WHERE cluster_id >= 0 AND snapshot IS NOT NULL
+                WHERE cluster_id >= 0 AND snapshot IS NOT NULL{date_sql}
                 ORDER BY timestamp DESC
-            """).fetchall()
+            """, date_params).fetchall()
             seen: Dict[int, int] = {}
             snap_rows = []
             for r in all_snaps:
@@ -385,17 +491,21 @@ class EventStore:
             for r in cluster_rows
         ]
 
-        # ── Singletons (cluster_id == -1, one entry per track_id) ─────────────
-        singleton_rows = conn.execute("""
+        # ── Singletons (cluster_id == -1, one entry per (camera_id, track_id)) ─
+        # track_id alone is not globally unique — each camera's OC-SORT
+        # instance numbers tracks from 0, so two different cameras (or two
+        # pipeline runs) can share a track_id. camera_id must be part of the
+        # grouping key or unrelated singletons collapse into one row.
+        singleton_rows = conn.execute(f"""
             SELECT track_id,
                    MIN(timestamp) AS first_seen,
                    camera_id,
                    MAX(snapshot)  AS snapshot
             FROM   unknown_embeddings
-            WHERE  cluster_id = -1
-            GROUP  BY track_id
+            WHERE  cluster_id = -1{date_sql}
+            GROUP  BY camera_id, track_id
             ORDER  BY first_seen DESC
-        """).fetchall()
+        """, date_params).fetchall()
 
         singletons = [
             {
@@ -439,11 +549,12 @@ class EventStore:
 
         # Single query avoids a TOCTOU race between two separate counts.
         # Clusters contribute one unit per distinct cluster_id (≥ 0);
-        # singletons contribute one unit per distinct track_id (cluster_id = -1).
+        # singletons contribute one unit per distinct (camera_id, track_id)
+        # pair (cluster_id = -1) — track_id alone collides across cameras.
         sql = f"""
             SELECT
-                COUNT(DISTINCT CASE WHEN cluster_id >= 0 THEN cluster_id  END) +
-                COUNT(DISTINCT CASE WHEN cluster_id =  -1 THEN track_id    END)
+                COUNT(DISTINCT CASE WHEN cluster_id >= 0 THEN cluster_id END) +
+                COUNT(DISTINCT CASE WHEN cluster_id =  -1 THEN camera_id || ':' || track_id END)
             FROM unknown_embeddings
             {where}
         """

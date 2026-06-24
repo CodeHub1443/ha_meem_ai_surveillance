@@ -15,11 +15,13 @@ WhatsAppBot orchestrates:
 
 import abc
 import logging
+import logging.handlers
 import os
 import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from queue import Queue
 
 import cv2
@@ -39,7 +41,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/whatsapp_bot.log", encoding="utf-8"),
+        logging.handlers.RotatingFileHandler(
+            "logs/whatsapp_bot.log", maxBytes=20 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        ),
     ],
 )
 log = logging.getLogger(__name__)
@@ -322,7 +326,10 @@ class WhatsAppBot:
     def __init__(self, sender: AlertSender):
         os.makedirs("logs", exist_ok=True)
         self.sender = sender
-        self.processed_ids: set = set()
+        # Bounded — an unbounded set here would grow by one entry per event
+        # for the lifetime of the process. 500 is far more than the
+        # one-event-at-a-time API this bot polls could ever need for dedup.
+        self.processed_ids: deque = deque(maxlen=500)
         self.last_timestamp: str = ""
         self.queue: Queue = Queue(maxsize=3)
 
@@ -353,7 +360,7 @@ class WhatsAppBot:
                         event_id = f"{ts}_{event.get('track_id')}"
                         if ts != self.last_timestamp and event_id not in self.processed_ids:
                             self.last_timestamp = ts
-                            self.processed_ids.add(event_id)
+                            self.processed_ids.append(event_id)
                             if not self.queue.full():
                                 self.queue.put(event)
                                 log.info(f"Event queued: {event_id}")

@@ -4,9 +4,11 @@ os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("ORT_NUM_THREADS", "2")
 
 import logging
+import logging.handlers
 import shutil
 import threading
 import time
+import zlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -32,7 +34,7 @@ from core.quality import calculate_blur_score, AdaptiveBlurThreshold
 from core.recognition import AdaFaceRecognizer
 from core.tracking import OCSORTTracker
 from core.utils.config import load_config
-from core.utils.image import align_face, pose_weight
+from core.utils.image import align_face, landmark_fit_residual, pose_weight
 from core import pipeline_metrics
 
 logging.basicConfig(
@@ -41,7 +43,9 @@ logging.basicConfig(
 )
 _log_dir = Path("logs")
 _log_dir.mkdir(parents=True, exist_ok=True)
-_fh = logging.FileHandler(_log_dir / "pipeline.log", encoding="utf-8")
+_fh = logging.handlers.RotatingFileHandler(
+    _log_dir / "pipeline.log", maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
 _fh.setLevel(logging.INFO)
 _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s"))
 logging.getLogger().addHandler(_fh)
@@ -114,9 +118,18 @@ class CameraWorker:
         fusion_cfg = config.get("fusion", {})
         track_cfg = config.get("tracking", {})
 
+        # track_id must be unique across cameras and across pipeline restarts
+        # — unknown-face clustering groups embeddings by track_id, and a
+        # collision (e.g. camera A's track 0 and camera B's track 0) would
+        # average two different strangers into one corrupted embedding.
+        # crc32(camera_id) gives a stable per-camera offset; the wall-clock
+        # seconds component makes every process run start from a fresh band.
+        _camera_offset = zlib.crc32(self.camera_id.encode()) % 1_000_000
+        _start_id = int(time.time()) * 1_000_000 + _camera_offset
         self.tracker = OCSORTTracker(
             iou_threshold=track_cfg.get("iou_threshold", 0.3),
             max_age=track_cfg.get("max_age", 10),
+            start_id=_start_id,
         )
         self.aggregator = EmbeddingAggregator(
             buffer_size=fusion_cfg.get("buffer_size", 10),
@@ -174,6 +187,16 @@ class CameraWorker:
         _quality_cfg = config.get("quality", {})
         self._min_pose_w: float = _quality_cfg.get("min_pose_weight", 0.0)
         self._min_stab: float = _quality_cfg.get("min_stab", 0.0)
+        # Stricter than detection.confidence (tracking floor) — a marginal
+        # detection may still help the temporal consensus, but it shouldn't be
+        # crowned as the saved "best frame" evidence photo for the track.
+        self._min_evidence_confidence: float = _quality_cfg.get("min_evidence_confidence", 0.55)
+        # Rejects geometrically-implausible "faces" (e.g. landmarks coincidentally
+        # placed on a hood's symmetric folds) from becoming evidence photos —
+        # see core.utils.image.landmark_fit_residual.
+        self._max_evidence_landmark_residual: float = _quality_cfg.get(
+            "max_evidence_landmark_residual", 6.0
+        )
 
         # Baseline metrics — Phase 0 instrumentation (no behaviour change)
         self.metrics = pipeline_metrics.get_or_create(self.camera_id)
@@ -319,8 +342,10 @@ class CameraWorker:
 
             if face.kps is not None:
                 aligned, align_ok = align_face(frame, face.kps, crop=crop)
+                landmark_residual = landmark_fit_residual(face.kps)
             else:
                 aligned, align_ok = cv2.resize(crop, (112, 112)), False
+                landmark_residual = float("inf")
 
             if not align_ok:
                 # Phase 2 (RC2 fix): degenerate geometry — extreme profile or
@@ -339,9 +364,18 @@ class CameraWorker:
             # Keep the sharpest/most-frontal frame seen for this track.
             # Saved to raw_frames at decision time instead of the decision frame
             # (by which point the person may have already walked past the camera).
-            prev_best, _ = self._best_frames.get(tid, (-1.0, None))
-            if face.quality_score > prev_best:
-                self._best_frames[tid] = (face.quality_score, frame.copy())
+            # min_evidence_confidence + max_evidence_landmark_residual exclude
+            # marginal/geometrically-implausible detections from becoming the
+            # saved evidence photo, even though they still feed the aggregator —
+            # if nothing in the track qualifies, snap_frame falls back to the
+            # live decision frame rather than presenting a false "best" photo.
+            prev_best, _, _ = self._best_frames.get(tid, (-1.0, None, None))
+            is_plausible_face = (
+                face.confidence >= self._min_evidence_confidence
+                and landmark_residual <= self._max_evidence_landmark_residual
+            )
+            if is_plausible_face and face.quality_score > prev_best:
+                self._best_frames[tid] = (face.quality_score, frame.copy(), face.bbox[:4].copy())
 
         # ── 6. Batched recognition ────────────────────────────────────
         if valid_crops:
@@ -545,10 +579,19 @@ class CameraWorker:
             # spot by the time enough frames have accumulated for a decision.
             best_entry = self._best_frames.pop(face.track_id, None)
             best_frame = best_entry[1] if best_entry is not None else None
+            best_bbox = best_entry[2] if best_entry is not None else None
             snap_frame = best_frame if best_frame is not None else frame  # full-res — io_worker copies inside submit()
 
-            # Save the same best-quality frame to raw_frames for gallery use.
+            # Save the same best-quality frame (pristine, unannotated) to
+            # raw_frames for gallery use — must happen before the box is drawn.
             self._save_gallery_frame(best_frame, face.track_id, emit_identity, emit_event)
+
+            # Mark up a separate copy with the actual face box that was
+            # evaluated. The camera frame often contains other people, so
+            # without this a reviewer has no way to tell which face the
+            # decision was actually based on.
+            if best_bbox is not None:
+                snap_frame = self._draw_evidence_box(snap_frame, best_bbox, emit_identity or "UNKNOWN")
 
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
@@ -585,6 +628,18 @@ class CameraWorker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         return annotated
+
+    @staticmethod
+    def _draw_evidence_box(frame: np.ndarray, bbox: np.ndarray, label: str) -> np.ndarray:
+        """Return a copy of frame with the evaluated face box + identity drawn on it."""
+        marked = frame.copy()
+        x1, y1, x2, y2 = bbox.astype(int)
+        cv2.rectangle(marked, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        cv2.putText(
+            marked, label, (x1, max(0, y1 - 12)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2,
+        )
+        return marked
 
     def _save_gallery_frame(
         self, best_frame, tid: int, identity: Optional[str], event: str

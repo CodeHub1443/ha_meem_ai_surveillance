@@ -17,6 +17,7 @@ import { SnapshotModal } from "@/components/shared/SnapshotModal";
 import type { ClusterGroup, ClusterSingleton, ClusteringResult } from "@/api/events";
 import { fetchPipelineStatus, fetchPipelineStats, fetchSseSubscribers, fetchLogs, fetchGalleryInfo } from "@/api/stubs";
 import { useSSEEvent } from "@/context/SSEContext";
+import { useToday } from "@/hooks/useToday";
 import type { SurveillanceEvent } from "@/types/surveillance";
 import { Activity, Bell, Server, Users, GitMerge, Loader2, RefreshCw, User } from "lucide-react";
 
@@ -229,14 +230,20 @@ function Diagnostics() {
 
 function ClusteringAnalysis() {
   const qc = useQueryClient();
+  const today = useToday(); // re-triggers at midnight — keeps the panel scoped to "today"
   const [minSize, setMinSize] = useState(2);
   const [threshold, setThreshold] = useState(0.45);
   const [polling, setPolling] = useState(false);
   const [lastResult, setLastResult] = useState<ClusteringResult | null>(null);
   const [zoomImg, setZoomImg] = useState<string | null>(null);
 
-  const stats = useQuery({ queryKey: ["stats-summary-debug"], queryFn: () => fetchStatsSummary(), refetchInterval: 30_000, staleTime: 30_000 });
-  const groups = useQuery({ queryKey: ["cluster-groups"], queryFn: () => fetchClusterGroups(4), staleTime: 60_000 });
+  // Clustering (and the groups it produces) is scoped to today by default on
+  // the backend — but /stats/summary is general-purpose and stays unscoped
+  // unless since/until are passed, so it must be told "today" explicitly
+  // here or these counters silently fall back to all-time totals.
+  const todaySince = `${today}T00:00:00.000Z`;
+  const stats = useQuery({ queryKey: ["stats-summary-debug", today], queryFn: () => fetchStatsSummary({ since: todaySince }), refetchInterval: 30_000, staleTime: 30_000 });
+  const groups = useQuery({ queryKey: ["cluster-groups", today], queryFn: () => fetchClusterGroups(4), staleTime: 60_000 });
 
   const { t } = useTranslation();
 

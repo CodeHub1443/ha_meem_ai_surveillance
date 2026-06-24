@@ -128,12 +128,23 @@ class OCSORTTracker:
         iou_threshold: float = 0.3,
         max_age: int = 10,
         min_hits: int = 1,
+        start_id: int = 0,
     ):
+        """
+        Args:
+            start_id: First track_id this instance will hand out. Each
+                camera owns its own tracker instance (see CLAUDE.md), so a
+                caller running multiple cameras must pass a disjoint
+                start_id per instance — otherwise two cameras (or two
+                pipeline runs) both number their tracks from 0 and produce
+                colliding IDs that downstream consumers (e.g. unknown-face
+                clustering) cannot tell apart.
+        """
         self.iou_threshold = iou_threshold
         self.max_age = max_age
         self.min_hits = min_hits
         self.trackers: List[OCSortKalmanTracker] = []
-        self._next_id: int = 0
+        self._next_id: int = start_id
 
     def _new_id(self) -> int:
         tid = self._next_id

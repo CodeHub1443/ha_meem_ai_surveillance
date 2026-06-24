@@ -494,7 +494,7 @@ def get_stats_summary(
         "unique_persons": unique_persons,
         "unique_unauthorized": unique_unauthorized,
         "last_clustered_at": meta["last_run_at"] if meta else None,
-        "total_unknown_embeddings": _event_store.count_unknown_embeddings(),
+        "total_unknown_embeddings": _event_store.count_unknown_embeddings(since=since, until=until),
     }
 
 
@@ -631,19 +631,38 @@ _clustering_lock = threading.Lock()
 _clustering_state: dict = {"status": "idle", "result": None, "error": None}
 
 
-def _run_clustering_bg(min_cluster_size: int, distance_threshold: float) -> None:
+def _default_today_window(since: Optional[str], until: Optional[str]) -> tuple[str, str]:
+    """Fill in an unset since/until with "today" in local time.
+
+    Matches the /audit/report convention — local time, not UTC, since UTC
+    would cut off events stamped ahead of UTC now.
+    """
+    if not since:
+        since = f"{datetime.now():%Y-%m-%d}T00:00:00"
+    if not until:
+        until = datetime.now().isoformat()
+    return since, until
+
+
+def _run_clustering_bg(
+    min_cluster_size: int, distance_threshold: float, since: str, until: str
+) -> None:
     global _clustering_state
     try:
         result = run_clustering(
             min_cluster_size=min_cluster_size,
             distance_threshold=distance_threshold,
+            since=since,
+            until=until,
         )
-        # Free embedding BLOBs for rows that now have a cluster label.
-        # Rows are kept for audit; only the 2 KB BLOB per row is nulled out.
+        # Free embedding BLOBs for already-clustered rows older than this run's
+        # window. Never prune inside the window itself — operators re-run
+        # clustering on "today" repeatedly (e.g. to retune distance_threshold),
+        # and a pruned (NULL) embedding can't be fed back into clustering.
         try:
-            pruned = _event_store.prune_clustered_embeddings()
+            pruned = _event_store.prune_clustered_embeddings(before=since)
             if pruned:
-                log.info("Pruned %d embedding BLOBs after clustering", pruned)
+                log.info("Pruned %d embedding BLOBs older than %s", pruned, since)
         except Exception as prune_exc:
             log.warning("prune_clustered_embeddings failed: %s", prune_exc)
         _clustering_state = {"status": "done", "result": result, "error": None}
@@ -654,8 +673,15 @@ def _run_clustering_bg(min_cluster_size: int, distance_threshold: float) -> None
 
 
 @app.get("/cluster/unknowns/groups")
-def get_cluster_groups(max_snapshots: int = Query(default=4, ge=1, le=10)):
-    return _event_store.get_cluster_groups(max_snapshots=max_snapshots)
+def get_cluster_groups(
+    max_snapshots: int = Query(default=4, ge=1, le=10),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+):
+    # Defaults to today — must match the window the most recent clustering
+    # run used, since cluster_id labels are only meaningful within one run.
+    since, until = _default_today_window(since, until)
+    return _event_store.get_cluster_groups(max_snapshots=max_snapshots, since=since, until=until)
 
 
 @app.get("/cluster/unknowns/status")
@@ -667,14 +693,17 @@ def get_clustering_status():
 def trigger_clustering(
     min_cluster_size: int = Query(default=2, ge=2, le=50),
     distance_threshold: float = Query(default=0.45, ge=0.1, le=1.0),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
 ):
     global _clustering_state
     if not _clustering_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Clustering already in progress")
+    since, until = _default_today_window(since, until)
     _clustering_state = {"status": "running", "result": None, "error": None}
     t = threading.Thread(
         target=_run_clustering_bg,
-        args=(min_cluster_size, distance_threshold),
+        args=(min_cluster_size, distance_threshold, since, until),
         daemon=True,
         name="clustering",
     )

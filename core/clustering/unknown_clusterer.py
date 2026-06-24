@@ -2,9 +2,14 @@
 
 Algorithm
 ---------
-1. Load every row from unknown_embeddings.
-2. Group by track_id and average all embeddings per track → one L2-normalised
-   representative vector per track visit.
+1. Load rows from unknown_embeddings within [since, until] (the API
+   defaults this window to "today" — answers "how many unique strangers
+   showed up today", not "ever", and keeps the O(n²) clustering step bounded
+   instead of reprocessing the full history on every run).
+2. Group by (camera_id, track_id) and average all embeddings per track → one
+   L2-normalised representative vector per track visit. camera_id is part of
+   the key because each camera runs its own OC-SORT instance with IDs
+   starting at 0, so numeric track_id is only unique per camera per run.
 3. Run AgglomerativeClustering(metric='cosine', linkage='complete',
    distance_threshold=<threshold>).
    - Complete linkage: ALL pairwise cosine distances within a cluster must be
@@ -25,7 +30,7 @@ Tuning distance_threshold (cosine distance = 1 − cosine_similarity):
 
 import logging
 from collections import Counter
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -39,6 +44,8 @@ def run_clustering(
     min_cluster_size: int = 2,
     distance_threshold: float = 0.45,
     max_tracks: int = 5000,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
 ) -> Dict:
     """Run the full clustering pipeline. Returns a result summary dict.
 
@@ -48,9 +55,17 @@ def run_clustering(
                             Smaller groups are labelled -1 (singletons).
         distance_threshold: Cosine distance ceiling for merging two tracks
                             into the same cluster. Lower = stricter.
+        since, until:       Restrict input to embeddings with timestamp in
+                            this range. The API defaults this to "today" —
+                            without a bound, every run reprocesses the
+                            entire history in unknown_embeddings, which is
+                            both slow (O(n²)) and answers a different
+                            question ("unique strangers ever" instead of
+                            "unique strangers today").
 
     Returns:
-        {n_embeddings, n_tracks, n_clusters, n_noise, unique_unauthorized}
+        {n_embeddings, n_tracks, n_clusters, n_noise, unique_unauthorized,
+         since, until}
     """
     try:
         from sklearn.cluster import AgglomerativeClustering
@@ -62,29 +77,36 @@ def run_clustering(
 
     store = EventStore(db_path) if db_path else EventStore()
 
-    rows = store.get_all_unknown_embeddings()
+    rows = store.get_all_unknown_embeddings(since=since, until=until)
     if not rows:
-        log.info("No unknown embeddings found — skipping clustering.")
+        log.info("No unknown embeddings found in [%s, %s] — skipping clustering.", since, until)
         return {
             "n_embeddings": 0,
             "n_tracks": 0,
             "n_clusters": 0,
             "n_noise": 0,
             "unique_unauthorized": 0,
+            "since": since,
+            "until": until,
         }
 
     n_embeddings = len(rows)
     log.info("Loaded %d unknown embeddings from DB.", n_embeddings)
 
     # ── Track-level aggregation ──────────────────────────────────────────────
-    track_groups: Dict[int, Dict] = {}
+    # Key by (camera_id, track_id), not track_id alone: each camera runs its
+    # own OC-SORT instance whose IDs start from 0, so the same numeric
+    # track_id is reused across cameras (and across pipeline restarts).
+    # Grouping by track_id alone would average two different strangers'
+    # embeddings into one corrupted vector before clustering ever runs.
+    track_groups: Dict[Tuple[str, int], Dict] = {}
     for row in rows:
-        tid = row["track_id"]
+        key = (row["camera_id"], row["track_id"])
         emb = np.frombuffer(row["embedding"], dtype=np.float32).copy()
-        if tid not in track_groups:
-            track_groups[tid] = {"db_ids": [], "embeddings": []}
-        track_groups[tid]["db_ids"].append(row["id"])
-        track_groups[tid]["embeddings"].append(emb)
+        if key not in track_groups:
+            track_groups[key] = {"db_ids": [], "embeddings": []}
+        track_groups[key]["db_ids"].append(row["id"])
+        track_groups[key]["embeddings"].append(emb)
 
     track_ids = list(track_groups.keys())
     track_reps = []
@@ -166,4 +188,6 @@ def run_clustering(
         "n_clusters": n_clusters,
         "n_noise": n_noise,
         "unique_unauthorized": n_clusters + n_noise,
+        "since": since,
+        "until": until,
     }

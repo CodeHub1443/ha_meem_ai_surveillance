@@ -33,6 +33,12 @@ quality:
   adaptive_window: 500         # Number of recent scores to consider
   min_pose_weight: 0.20        # Skip profile frames (pose_w floor = 0.10 = extreme profile)
   min_stab: 0.15               # Skip tracking-contamination frames (stab < 0.15 = different person)
+  min_evidence_confidence: 0.55  # Stricter than detection.confidence (0.4) — gates only which
+                                  # frame is saved as the track's evidence photo; weaker
+                                  # detections still contribute to the recognition consensus.
+  max_evidence_landmark_residual: 6.0  # px, 112-canonical scale. Rejects geometrically-
+                                  # implausible "faces" (e.g. landmarks on a hood's symmetric
+                                  # folds) from becoming the evidence photo. Tune empirically.
 
 # Diagnostic logging — per-frame scores for accuracy root-cause analysis
 # Produces [DIAG] and [DIAG DECISION] log lines at INFO level.
