@@ -6,7 +6,7 @@ from ..utils.bbox import calculate_iou
 class IOUTracker:
     """Simple IoU-based greedy tracker (kept as lightweight fallback).
 
-    For production use, prefer SORTTracker which handles occlusion and
+    For production use, prefer OCSORTTracker which handles occlusion and
     fast motion via Kalman filter + Hungarian optimal assignment.
     """
 

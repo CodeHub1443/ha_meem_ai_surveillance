@@ -16,6 +16,6 @@ tracking:
   max_age: 10                  # Frames a track survives without a match (OC-SORT recovers longer)
 
 recognition:
-  unknown_hold_seconds: 3.0    # Seconds to hold an UNKNOWN decision before emitting.
+  unknown_hold_seconds: 5.0    # Seconds to hold an UNKNOWN decision before emitting.
                                # If the track upgrades to AUTHORIZED within this window,
                                # the UNKNOWN event is silently discarded.

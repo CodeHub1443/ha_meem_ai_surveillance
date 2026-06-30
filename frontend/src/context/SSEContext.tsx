@@ -92,12 +92,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       void queryClient.invalidateQueries({ queryKey: ["events", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["events", "count"] });
 
-      // ── 4. Invalidate report aggregates so reports stay fresh
-      void queryClient.invalidateQueries({ queryKey: ["report-stats"] });
-      void queryClient.invalidateQueries({ queryKey: ["report-count"] });
-      void queryClient.invalidateQueries({ queryKey: ["report-events"] });
-
-      // ── 4b. Debounced events-page stats summary invalidation.
+      // ── 4. Debounced events-page stats summary invalidation.
       // invalidateQueries bypasses staleTime and refetches immediately — at peak
       // traffic (30+ events/min) this would hammer /stats/summary once per event.
       // Coalesce into one refetch per 2 s instead.

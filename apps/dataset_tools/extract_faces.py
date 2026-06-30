@@ -65,7 +65,10 @@ def main():
         return
         
     detector = SCRFDDetector(config, config['models']['scrfd_onnx'])
-    min_face_size = config.get('recognition', {}).get('min_face_size', 140)
+    min_face_size = dataset_cfg.get(
+        'min_face_size',
+        config.get('recognition', {}).get('min_face_size', 40),
+    )
     
     # Statistics
     persons_count = 0

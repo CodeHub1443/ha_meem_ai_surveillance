@@ -49,7 +49,7 @@ class EmbeddingAggregator:
         self.expire_after_seconds = expire_after_seconds
 
         # track_id → {entries, first_seen, last_updated}
-        # entries: list of (embedding, blur_score, timestamp)
+        # entries: list of (embedding, quality_score, timestamp)
         self.track_buffers: Dict[int, Dict] = {}
         self._lock = threading.Lock()
 
@@ -146,7 +146,7 @@ class EmbeddingAggregator:
                 del self.track_buffers[tid]
         return stale
 
-    def clear_track(self, track_id: int):
+    def clear_track(self, track_id: int) -> None:
         """Explicitly remove a single track's buffer."""
         with self._lock:
             self.track_buffers.pop(track_id, None)

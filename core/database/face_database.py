@@ -123,3 +123,39 @@ class FaceDatabase:
                 return None, best_score
 
         return best_id, best_score
+
+    def match_diagnostics(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 10,
+    ) -> list:
+        """Return up to 3 (identity, score) pairs for diagnostic logging.
+
+        No threshold or margin filtering — raw ranked identity scores only.
+        """
+        if self.stored_embeddings is None:
+            return []
+
+        q = query_embedding.astype(np.float32)
+        norm = np.linalg.norm(q)
+        if norm > 0:
+            q = q / norm
+
+        k = max(2, min(top_k, len(self.ids)))
+
+        if self._use_faiss:
+            raw_scores, raw_indices = self._faiss_index.search(q.reshape(1, -1), k)
+            score_iter = zip(raw_scores[0], raw_indices[0])
+        else:
+            all_scores = np.dot(self.stored_embeddings, q)
+            top_indices = np.argsort(all_scores)[::-1][:k]
+            score_iter = ((float(all_scores[i]), i) for i in top_indices)
+
+        identity_scores: dict = {}
+        for s, idx in score_iter:
+            identity = self.ids[int(idx)]
+            if identity not in identity_scores or s > identity_scores[identity]:
+                identity_scores[identity] = float(s)
+
+        ranked = sorted(identity_scores.items(), key=lambda x: x[1], reverse=True)
+        return ranked[:3]

@@ -4,9 +4,11 @@ os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("ORT_NUM_THREADS", "2")
 
 import logging
+import logging.handlers
 import shutil
 import threading
 import time
+import zlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -39,6 +41,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+_log_dir = Path("logs")
+_log_dir.mkdir(parents=True, exist_ok=True)
+_fh = logging.handlers.RotatingFileHandler(
+    _log_dir / "pipeline.log", maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+_fh.setLevel(logging.INFO)
+_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s"))
+logging.getLogger().addHandler(_fh)
 log = logging.getLogger("pipeline")
 
 
@@ -108,16 +118,25 @@ class CameraWorker:
         fusion_cfg = config.get("fusion", {})
         track_cfg = config.get("tracking", {})
 
+        # track_id must be unique across cameras and across pipeline restarts
+        # — unknown-face clustering groups embeddings by track_id, and a
+        # collision (e.g. camera A's track 0 and camera B's track 0) would
+        # average two different strangers into one corrupted embedding.
+        # crc32(camera_id) gives a stable per-camera offset; the wall-clock
+        # seconds component makes every process run start from a fresh band.
+        _camera_offset = zlib.crc32(self.camera_id.encode()) % 1_000_000
+        _start_id = int(time.time()) * 1_000_000 + _camera_offset
         self.tracker = OCSORTTracker(
             iou_threshold=track_cfg.get("iou_threshold", 0.3),
             max_age=track_cfg.get("max_age", 10),
+            start_id=_start_id,
         )
         self.aggregator = EmbeddingAggregator(
             buffer_size=fusion_cfg.get("buffer_size", 10),
-            min_frames=2,
-            min_decision_seconds=fusion_cfg.get("min_decision_seconds", 0.5),
+            min_frames=fusion_cfg.get("min_frames", 5),
+            min_decision_seconds=fusion_cfg.get("min_decision_seconds", 2.0),
             recency_decay=fusion_cfg.get("recency_decay", 0.95),
-            expire_after_seconds=fusion_cfg.get("expire_after_seconds", 3.0),
+            expire_after_seconds=fusion_cfg.get("expire_after_seconds", 5.0),
         )
         self.blur_threshold = AdaptiveBlurThreshold(
             window_size=config.get("quality", {}).get("adaptive_window", 500),
@@ -160,12 +179,30 @@ class CameraWorker:
         self._logged_size_reject: set = set()
         self._logged_blur_reject: set = set()
 
+        diag_cfg = config.get("diagnostic", {})
+        self._diag_enabled: bool = diag_cfg.get("per_frame_logging", False)
+        self._prev_embeddings: dict = {}   # track_id → last L2-normalized embedding (gate passes only)
+        self._frame_diag: dict = {}        # track_id → {"scores": list[float], "first_ts": float}
+
+        _quality_cfg = config.get("quality", {})
+        self._min_pose_w: float = _quality_cfg.get("min_pose_weight", 0.0)
+        self._min_stab: float = _quality_cfg.get("min_stab", 0.0)
+
         # Baseline metrics — Phase 0 instrumentation (no behaviour change)
         self.metrics = pipeline_metrics.get_or_create(self.camera_id)
         # Maps track_id → last emitted event type for flip detection
         self._track_last_event: dict = {}
         # Timestamp of last daily metric summary log
         self._last_metric_log_day: int = -1
+
+        # Best-frame buffer: track_id → (quality_score, full_res_frame)
+        # Updated every frame that passes all quality gates; saved to raw_frames
+        # at decision time so gallery can be rebuilt from real runtime frames.
+        self._best_frames: dict = {}
+        dataset_cfg = config.get("dataset", {})
+        self._raw_frames_root = Path(
+            dataset_cfg.get("raw_frames", "dataset/raw_frames")
+        )
 
         self.running = False
 
@@ -194,30 +231,33 @@ class CameraWorker:
             ]
 
         # ── 4. Self-expiry: clean aggregator + state ───────────────────
+        # Phase 1 (RC3 fix): snapshot active OC-SORT tracks BEFORE expiry.
+        # A track absent from OC-SORT is truly gone; one still present just
+        # had a SCRFD detection gap (face turned away) and must keep its
+        # identity state intact.
+        active_ids = self.tracker.get_active_track_ids()
+
         expired_ids = self.aggregator.expire_stale_tracks()
         for tid in expired_ids:
-            # RC3 baseline counter: count every time a decided track's identity
-            # is about to be erased by aggregator expiry (not OC-SORT drop).
-            # Phase 1 will guard this; Phase 0 only measures it.
             if self.state.is_decided(tid):
                 self.metrics.record_decided_clobber()
-            held = self.state.release_track(tid)
-            if held is not None:
-                # Person left frame without being recognised → emit now
-                ts = datetime.fromisoformat(held["event_data"]["timestamp"])
-                self.io_worker.submit(
-                    held["frame"], held["event_data"], None, ts, held["embedding"]
-                )
-                log.info(
-                    f"[{self.camera_id}] EMIT DEFERRED UNKNOWN track={tid} (track expired)"
-                )
+            if tid not in active_ids:
+                # OC-SORT also dropped this track — person truly left the frame.
+                held = self.state.release_track(tid)
+                if held is not None:
+                    ts = datetime.fromisoformat(held["event_data"]["timestamp"])
+                    self.io_worker.submit(
+                        held["frame"], held["event_data"], None, ts, held["embedding"]
+                    )
+                    log.info(
+                        f"[{self.camera_id}] EMIT DEFERRED UNKNOWN track={tid} (track lost)"
+                    )
             self._logged_size_reject.discard(tid)
             self._logged_blur_reject.discard(tid)
+            self._prev_embeddings.pop(tid, None)
+            self._frame_diag.pop(tid, None)
+            self._best_frames.pop(tid, None)
 
-        # Purge log-suppress sets for tracks OC-SORT dropped that never produced
-        # embeddings (too small / too blurry throughout) — those IDs never appear
-        # in expire_stale_tracks() because the aggregator has no entry for them.
-        active_ids = self.tracker.get_active_track_ids()
         self._logged_size_reject &= active_ids
         self._logged_blur_reject &= active_ids
 
@@ -279,27 +319,87 @@ class CameraWorker:
 
             face.blur_score = blur
             pw = pose_weight(face.kps) if face.kps is not None else 1.0
+
+            if self._min_pose_w > 0.0 and pw < self._min_pose_w:
+                log.debug(
+                    "[%s] track=%d SKIP: pose_w=%.2f < %.2f",
+                    self.camera_id, tid, pw, self._min_pose_w,
+                )
+                continue
+
             size_factor = min(face.width / 112.0, 1.0)
             face.quality_score = blur * face.confidence * pw * size_factor
-            valid_faces.append(face)
+
             if face.kps is not None:
                 aligned, align_ok = align_face(frame, face.kps, crop=crop)
             else:
                 aligned, align_ok = cv2.resize(crop, (112, 112)), False
-            # Phase 0: count alignment fallbacks; Phase 2 will skip these frames.
+
             if not align_ok:
+                # Phase 2 (RC2 fix): degenerate geometry — extreme profile or
+                # edge-of-frame landmarks.  Raw-crop resize produces a garbage
+                # embedding that dilutes the consensus.  Skip the frame entirely
+                # rather than feeding noise into the aggregator.
                 self.metrics.record_alignment_fallback()
                 log.debug(
-                    f"[{self.camera_id}] track={tid} alignment fallback counted "
-                    f"(raw crop resize used — will be skipped in Phase 2)"
+                    f"[{self.camera_id}] track={tid} alignment failed — frame skipped"
                 )
+                continue
+
+            valid_faces.append(face)
             valid_crops.append(aligned)
+
+            # Keep the sharpest/most-frontal frame seen for this track.
+            # Saved to raw_frames at decision time instead of the decision frame
+            # (by which point the person may have already walked past the camera).
+            prev_best, _ = self._best_frames.get(tid, (-1.0, None))
+            if face.quality_score > prev_best:
+                self._best_frames[tid] = (face.quality_score, frame.copy())
 
         # ── 6. Batched recognition ────────────────────────────────────
         if valid_crops:
             embeddings = self.models.recognizer.extract_embeddings_batch(valid_crops)
             for face, emb in zip(valid_faces, embeddings):
+                tid = face.track_id
+                prev_emb = self._prev_embeddings.get(tid)
+                cur_stab = float(np.dot(emb, prev_emb)) if prev_emb is not None else None
+
+                # Stability gate — skip tracking-contamination frames.
+                # Do NOT update _prev_embeddings on skip; next frame compares against
+                # the last clean embedding, not the contaminated one.
+                if cur_stab is not None and self._min_stab > 0.0 and cur_stab < self._min_stab:
+                    log.debug(
+                        "[%s] track=%d SKIP: stab=%.3f < %.2f (embedding jump)",
+                        self.camera_id, tid, cur_stab, self._min_stab,
+                    )
+                    continue  # face.embedding stays None → aggregator ignores it
+
                 face.embedding = emb
+                self._prev_embeddings[tid] = emb.copy()
+
+                if self._diag_enabled:
+                    top3 = self.models.face_db.match_diagnostics(emb, top_k=self.match_top_k)
+                    frame_margin = top3[0][1] - top3[1][1] if len(top3) >= 2 else 0.0
+                    diag_entry = self._frame_diag.setdefault(
+                        tid, {"scores": [], "identities": [], "first_ts": time.time()}
+                    )
+                    frame_num = len(diag_entry["scores"]) + 1
+                    diag_entry["scores"].append(top3[0][1] if top3 else 0.0)
+                    diag_entry["identities"].append(top3[0][0] if top3 else None)
+                    pw_val = pose_weight(face.kps) if face.kps is not None else 1.0
+                    top_str = "  ".join(
+                        f"{pid}:{sc:.3f}" for pid, sc in top3
+                    ) if top3 else "no_gallery"
+                    stab_str = f"{cur_stab:.3f}" if cur_stab is not None else "n/a"
+                    log.info(
+                        "[DIAG] cam=%s track=%d frame=%d"
+                        " face=%dx%d blur=%.1f quality=%.3f pose_w=%.2f"
+                        " | %s | margin=%.3f stab=%s",
+                        self.camera_id, tid, frame_num,
+                        int(face.width), int(face.height),
+                        face.blur_score, face.quality_score, pw_val,
+                        top_str, frame_margin, stab_str,
+                    )
 
         # ── 7. Aggregation + matching ─────────────────────────────────
         for face in valid_faces:
@@ -354,6 +454,74 @@ class CameraWorker:
                 emit_identity = identity
                 emit_event = "AUTHORIZED" if identity else "UNKNOWN"
 
+            if self._diag_enabled:
+                diag = self._frame_diag.get(face.track_id, {})
+                frame_scores = diag.get("scores", [])
+                elapsed = time.time() - diag.get("first_ts", time.time())
+                top3c = self.models.face_db.match_diagnostics(
+                    consensus, top_k=self.match_top_k
+                )
+                cons_margin = top3c[0][1] - top3c[1][1] if len(top3c) >= 2 else 0.0
+                best_f = max(frame_scores) if frame_scores else 0.0
+                avg_f = float(np.mean(frame_scores)) if frame_scores else 0.0
+                med_f = float(np.median(frame_scores)) if frame_scores else 0.0
+                top3c_str = "  ".join(
+                    f"{pid}:{sc:.3f}" for pid, sc in top3c
+                ) if top3c else "no_gallery"
+                id_seq = diag.get("identities", [])
+                id_switches = sum(
+                    1 for i in range(1, len(id_seq))
+                    if id_seq[i] is not None
+                    and id_seq[i - 1] is not None
+                    and id_seq[i] != id_seq[i - 1]
+                )
+                if emit_event == "UNKNOWN":
+                    reject_reason = "margin" if score >= self.similarity_threshold else "threshold"
+                else:
+                    reject_reason = "none"
+                log.info(
+                    "[DIAG DECISION] cam=%s track=%d frames=%d elapsed=%.2fs"
+                    " | consensus: %s | margin=%.3f"
+                    " | best_frame=%.3f avg_frame=%.3f median_frame=%.3f"
+                    " | id_switches=%d reject_reason=%s"
+                    " → %s (threshold=%.2f)",
+                    self.camera_id, face.track_id,
+                    len(frame_scores), elapsed,
+                    top3c_str, cons_margin,
+                    best_f, avg_f, med_f,
+                    id_switches, reject_reason,
+                    emit_event, self.similarity_threshold,
+                )
+
+                # Sorted per-frame scores (descending) to reveal score distribution:
+                # Reality A = many scores above threshold (aggregator is the bottleneck)
+                # Reality B = one high score, rest low (per-frame matching needed)
+                # Reality C = a few high scores, rest low (quality-filtered top-K)
+                if frame_scores:
+                    sorted_scores = sorted(frame_scores, reverse=True)
+                    top10_str = " ".join(f"{s:.3f}" for s in sorted_scores[:10])
+                    above_thresh = sum(1 for s in frame_scores if s >= self.similarity_threshold)
+                    log.info(
+                        "[DIAG SCORES] cam=%s track=%d total_frames=%d above_threshold=%d"
+                        " | top10: %s",
+                        self.camera_id, face.track_id,
+                        len(frame_scores), above_thresh, top10_str,
+                    )
+
+                if emit_event == "AUTHORIZED":
+                    diag_class = "AUTHORIZED"
+                elif id_switches <= 2 and best_f >= 0.40:
+                    diag_class = "LOW_CONFIDENCE_MATCH"
+                else:
+                    diag_class = "NO_STABLE_MATCH"
+                candidate = top3c[0][0] if top3c else "none"
+                log.info(
+                    "[DIAG CLASS] cam=%s track=%d state=%s"
+                    " best=%.3f switches=%d consensus=%.3f candidate=%s",
+                    self.camera_id, face.track_id, diag_class,
+                    best_f, id_switches, score, candidate,
+                )
+
             # ── Baseline metrics for this decision ─────────────────────
             self.metrics.record_event(face.track_id)
             prev_event = self._track_last_event.get(face.track_id)
@@ -385,9 +553,15 @@ class CameraWorker:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
             )
 
-            # Resize to stream resolution once for snapshot/hold — avoids a ~6 MB
-            # full-res copy on the hot path (io_worker copies again inside submit).
-            snap_frame = cv2.resize(frame, (_STREAM_WIDTH, _STREAM_HEIGHT))
+            # Use the sharpest/most-frontal frame seen for this track instead of
+            # the live decision frame, which is often their back or an empty
+            # spot by the time enough frames have accumulated for a decision.
+            best_entry = self._best_frames.pop(face.track_id, None)
+            best_frame = best_entry[1] if best_entry is not None else None
+            snap_frame = best_frame if best_frame is not None else frame  # full-res — io_worker copies inside submit()
+
+            # Save the same best-quality frame to raw_frames for gallery use.
+            self._save_gallery_frame(best_frame, face.track_id, emit_identity, emit_event)
 
             if emit_event == "UNKNOWN":
                 # Hold — wait to see if this track upgrades before emitting
@@ -424,6 +598,31 @@ class CameraWorker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         return annotated
+
+    def _save_gallery_frame(
+        self, best_frame, tid: int, identity: Optional[str], event: str
+    ) -> None:
+        """Save the best-quality buffered frame to raw_frames for gallery rebuilding.
+
+        AUTHORIZED → raw_frames/<identity>/
+        UNKNOWN    → raw_frames/_unknowns/<camera_id>/
+        """
+        if best_frame is None:
+            return
+
+        if event == "AUTHORIZED" and identity:
+            out_dir = self._raw_frames_root / identity
+        else:
+            out_dir = self._raw_frames_root / "_unknowns" / self.camera_id
+
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            filename = f"{ts}_{self.camera_id}_t{tid}.jpg"
+            cv2.imwrite(str(out_dir / filename), best_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            log.debug("[%s] gallery frame saved: %s/%s", self.camera_id, out_dir.name, filename)
+        except Exception as exc:
+            log.warning("[%s] gallery frame save failed: %s", self.camera_id, exc)
 
     # ------------------------------------------------------------------
     # Thread entry point
@@ -578,6 +777,7 @@ def run_pipeline():
         "configs/default.yaml",
         "configs/thresholds.yaml",
         "configs/tensorrt.yaml",
+        "configs/dataset.yaml",
     )
     try:
         with open("configs/cameras.yaml") as f:
@@ -586,9 +786,11 @@ def run_pipeline():
         log.error("configs/cameras.yaml not found")
         return
 
-    cameras = camera_cfg.get("cameras", [])
+    all_cameras = camera_cfg.get("cameras", [])
+    # Honour explicit active flag; fall back to URL-presence check for legacy entries
+    cameras = [c for c in all_cameras if c.get("active", bool(c.get("url")))]
     if not cameras:
-        log.error("No cameras defined in cameras.yaml")
+        log.error("No active cameras defined in cameras.yaml")
         return
 
     _cleanup_old_snapshots(
@@ -609,12 +811,50 @@ def run_pipeline():
         t.start()
 
     log.info("Pipeline running — frames shared via in-memory buffer. Press Ctrl+C to stop.")
+    _cam_cfg_path = "configs/cameras.yaml"
+    _worker_map = {w.camera_id: w for w in workers}
+    _cam_cfg_mtime = os.path.getmtime(_cam_cfg_path)
     try:
         # Keep main thread alive while worker threads run; 1s timeout lets
         # KeyboardInterrupt be delivered promptly even inside join().
         while any(t.is_alive() for t in threads):
             for t in threads:
                 t.join(timeout=1.0)
+            # Hot-reload config when cameras.yaml is modified externally (e.g. via API).
+            try:
+                mtime = os.path.getmtime(_cam_cfg_path)
+                if mtime != _cam_cfg_mtime:
+                    _cam_cfg_mtime = mtime
+                    with open(_cam_cfg_path) as f:
+                        reloaded = yaml.safe_load(f) or {}
+                    for cam_cfg in reloaded.get("cameras", []):
+                        cid = cam_cfg["id"]
+                        is_active = cam_cfg.get("active", bool(cam_cfg.get("url")))
+
+                        if cid in _worker_map:
+                            worker = _worker_map[cid]
+                            # ROI: applied immediately without restart
+                            worker.set_roi(cam_cfg.get("roi"))
+                            log.info("[%s] ROI hot-reloaded: %s", cid, cam_cfg.get("roi"))
+                            # Disable: stop worker immediately
+                            if not is_active and worker.running:
+                                log.info("[%s] Disabled via config — stopping worker", cid)
+                                worker.stop()
+                        elif is_active and cam_cfg.get("url"):
+                            # New camera added at runtime with a valid URL — spawn its worker now
+                            log.info("[%s] New camera detected in config — spawning worker", cid)
+                            new_worker = CameraWorker(cam_cfg, models, config)
+                            new_thread = threading.Thread(
+                                target=new_worker.run,
+                                daemon=True,
+                                name=f"cam-{cid}",
+                            )
+                            _worker_map[cid] = new_worker
+                            workers.append(new_worker)
+                            threads.append(new_thread)
+                            new_thread.start()
+            except Exception as e:
+                log.warning("Config hot-reload check failed: %s", e)
     except KeyboardInterrupt:
         log.info("Interrupt received — shutting down…")
     finally:

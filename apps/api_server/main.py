@@ -85,17 +85,29 @@ def _load_aligned_faces_dir() -> str:
 ALIGNED_FACES_DIR = _load_aligned_faces_dir()
 
 
+_cameras_cache: Optional[List[Dict]] = None
+_cameras_mtime: float = 0.0
+_cameras_lock = threading.Lock()
+
+
 def _load_cameras() -> List[Dict]:
+    global _cameras_cache, _cameras_mtime
     try:
-        with open(CAMERAS_CONFIG) as f:
-            cfg = yaml.safe_load(f) or {}
-        return cfg.get("cameras", [])
-    except FileNotFoundError:
+        mtime = os.path.getmtime(CAMERAS_CONFIG)
+    except OSError:
         log.warning("cameras.yaml not found at %s", CAMERAS_CONFIG)
         return []
-    except Exception as e:
-        log.error("Failed to load cameras config: %s", e)
-        return []
+    with _cameras_lock:
+        if _cameras_cache is None or mtime != _cameras_mtime:
+            try:
+                with open(CAMERAS_CONFIG) as f:
+                    cfg = yaml.safe_load(f) or {}
+                _cameras_cache = cfg.get("cameras", [])
+                _cameras_mtime = mtime
+            except Exception as e:
+                log.error("Failed to load cameras config: %s", e)
+                return []
+        return _cameras_cache
 
 
 def _capture_frame(rtsp_url: str):
@@ -244,6 +256,52 @@ class PersonUpdate(BaseModel):
     employee_id: Optional[str] = None
     designation: Optional[str] = None
     working_area: Optional[str] = None
+
+
+class AuditSighting(BaseModel):
+    timestamp: str
+    camera_id: str
+    direction: str  # "entry" | "exit"
+
+
+class AuthorizedPersonAudit(BaseModel):
+    identity: str
+    first_entry_camera: Optional[str] = None
+    first_entry_time: Optional[str] = None
+    last_exit_camera: Optional[str] = None
+    last_exit_time: Optional[str] = None
+    status: str  # "inside" | "exited"
+    all_sightings: List[AuditSighting]
+
+
+class AuditSummary(BaseModel):
+    total_unique_persons: int
+    total_unique_authorized: int
+    total_unique_unauthorized: int
+    authorized_currently_inside: int
+    unknown_currently_inside: int
+
+
+class UnknownSummary(BaseModel):
+    entry_count: int
+    exit_count: int
+    net_inside: int
+    unique_clusters: int
+    entry_cameras: Dict[str, int]
+    exit_cameras: Dict[str, int]
+
+
+class AuditWindow(BaseModel):
+    since: str
+    until: str
+
+
+class AuditReport(BaseModel):
+    generated_at: str
+    window: AuditWindow
+    summary: AuditSummary
+    authorized_persons: List[AuthorizedPersonAudit]
+    unknown_summary: UnknownSummary
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -436,7 +494,7 @@ def get_stats_summary(
         "unique_persons": unique_persons,
         "unique_unauthorized": unique_unauthorized,
         "last_clustered_at": meta["last_run_at"] if meta else None,
-        "total_unknown_embeddings": _event_store.count_unknown_embeddings(),
+        "total_unknown_embeddings": _event_store.count_unknown_embeddings(since=since, until=until),
     }
 
 
@@ -455,25 +513,156 @@ def get_pipeline_metrics():
     }
 
 
+# ── Audit (point-in-time room occupancy report) ────────────────────────────────
+
+# camera_01/camera_03 face the entry side of each gate, camera_02/camera_04 the
+# exit side — mirrors the physical layout in cameras.yaml.
+ENTRY_CAMERAS = {"camera_01", "camera_03"}
+EXIT_CAMERAS = {"camera_02", "camera_04"}
+
+
+def _compute_audit_report(since: str, until: str) -> Dict[str, Any]:
+    conn = _event_store._conn()
+
+    rows = conn.execute(
+        """SELECT timestamp, camera_id, identity FROM events
+           WHERE event_type = 'AUTHORIZED' AND identity IS NOT NULL
+             AND timestamp >= ? AND timestamp <= ?
+           ORDER BY identity, timestamp ASC""",
+        (since, until),
+    ).fetchall()
+
+    sightings_by_identity: Dict[str, List[Dict]] = {}
+    for r in rows:
+        camera_id = r["camera_id"]
+        if camera_id in ENTRY_CAMERAS:
+            direction = "entry"
+        elif camera_id in EXIT_CAMERAS:
+            direction = "exit"
+        else:
+            continue  # camera not mapped to either side of a gate
+        sightings_by_identity.setdefault(r["identity"], []).append({
+            "timestamp": r["timestamp"],
+            "camera_id": camera_id,
+            "direction": direction,
+        })
+
+    authorized_persons = []
+    for identity, sightings in sightings_by_identity.items():
+        first_entry = next((s for s in sightings if s["direction"] == "entry"), None)
+        last_exit = next((s for s in reversed(sightings) if s["direction"] == "exit"), None)
+        status = "exited" if sightings[-1]["direction"] == "exit" else "inside"
+        authorized_persons.append({
+            "identity": identity,
+            "first_entry_camera": first_entry["camera_id"] if first_entry else None,
+            "first_entry_time": first_entry["timestamp"] if first_entry else None,
+            "last_exit_camera": last_exit["camera_id"] if last_exit else None,
+            "last_exit_time": last_exit["timestamp"] if last_exit else None,
+            "status": status,
+            "all_sightings": sightings,
+        })
+    authorized_persons.sort(key=lambda p: p["identity"])
+    authorized_currently_inside = sum(1 for p in authorized_persons if p["status"] == "inside")
+
+    unknown_rows = conn.execute(
+        """SELECT camera_id, COUNT(*) AS cnt FROM events
+           WHERE event_type = 'UNKNOWN' AND timestamp >= ? AND timestamp <= ?
+           GROUP BY camera_id""",
+        (since, until),
+    ).fetchall()
+
+    entry_cameras: Dict[str, int] = {}
+    exit_cameras: Dict[str, int] = {}
+    for r in unknown_rows:
+        if r["camera_id"] in ENTRY_CAMERAS:
+            entry_cameras[r["camera_id"]] = r["cnt"]
+        elif r["camera_id"] in EXIT_CAMERAS:
+            exit_cameras[r["camera_id"]] = r["cnt"]
+    entry_count = sum(entry_cameras.values())
+    exit_count = sum(exit_cameras.values())
+    net_inside = max(0, entry_count - exit_count)
+
+    # Unique unknown individuals come from the same clustering data the Debug
+    # module shows — None means clustering has never been run.
+    unique_clusters = _event_store.count_unique_unauthorized(since=since, until=until) or 0
+
+    total_unique_authorized = len(authorized_persons)
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "window": {"since": since, "until": until},
+        "summary": {
+            "total_unique_persons": total_unique_authorized + unique_clusters,
+            "total_unique_authorized": total_unique_authorized,
+            "total_unique_unauthorized": unique_clusters,
+            "authorized_currently_inside": authorized_currently_inside,
+            "unknown_currently_inside": net_inside,
+        },
+        "authorized_persons": authorized_persons,
+        "unknown_summary": {
+            "entry_count": entry_count,
+            "exit_count": exit_count,
+            "net_inside": net_inside,
+            "unique_clusters": unique_clusters,
+            "entry_cameras": entry_cameras,
+            "exit_cameras": exit_cameras,
+        },
+    }
+
+
+@app.get("/audit/report", response_model=AuditReport)
+def get_audit_report(
+    since: Optional[str] = Query(default=None, description="ISO timestamp, defaults to today 00:00"),
+    until: Optional[str] = Query(default=None, description="ISO timestamp, defaults to now"),
+):
+    # Event timestamps are written with the pipeline's local clock
+    # (datetime.now() in entry_pipeline/main.py), so the "today" window must
+    # use local time too — UTC would cut off events stamped ahead of UTC now.
+    if not since:
+        since = f"{datetime.now():%Y-%m-%d}T00:00:00"
+    if not until:
+        until = datetime.now().isoformat()
+    return _compute_audit_report(since, until)
+
+
 # ── Clustering ─────────────────────────────────────────────────────────────────
 
 _clustering_lock = threading.Lock()
 _clustering_state: dict = {"status": "idle", "result": None, "error": None}
 
 
-def _run_clustering_bg(min_cluster_size: int, distance_threshold: float) -> None:
+def _default_today_window(since: Optional[str], until: Optional[str]) -> tuple[str, str]:
+    """Fill in an unset since/until with "today" in local time.
+
+    Matches the /audit/report convention — local time, not UTC, since UTC
+    would cut off events stamped ahead of UTC now.
+    """
+    if not since:
+        since = f"{datetime.now():%Y-%m-%d}T00:00:00"
+    if not until:
+        until = datetime.now().isoformat()
+    return since, until
+
+
+def _run_clustering_bg(
+    min_cluster_size: int, distance_threshold: float, since: str, until: str
+) -> None:
     global _clustering_state
     try:
         result = run_clustering(
             min_cluster_size=min_cluster_size,
             distance_threshold=distance_threshold,
+            since=since,
+            until=until,
         )
-        # Free embedding BLOBs for rows that now have a cluster label.
-        # Rows are kept for audit; only the 2 KB BLOB per row is nulled out.
+        # Free embedding BLOBs for already-clustered rows older than this run's
+        # window. Never prune inside the window itself — operators re-run
+        # clustering on "today" repeatedly (e.g. to retune distance_threshold),
+        # and a pruned (NULL) embedding can't be fed back into clustering.
         try:
-            pruned = _event_store.prune_clustered_embeddings()
+            pruned = _event_store.prune_clustered_embeddings(before=since)
             if pruned:
-                log.info("Pruned %d embedding BLOBs after clustering", pruned)
+                log.info("Pruned %d embedding BLOBs older than %s", pruned, since)
         except Exception as prune_exc:
             log.warning("prune_clustered_embeddings failed: %s", prune_exc)
         _clustering_state = {"status": "done", "result": result, "error": None}
@@ -484,8 +673,15 @@ def _run_clustering_bg(min_cluster_size: int, distance_threshold: float) -> None
 
 
 @app.get("/cluster/unknowns/groups")
-def get_cluster_groups(max_snapshots: int = Query(default=4, ge=1, le=10)):
-    return _event_store.get_cluster_groups(max_snapshots=max_snapshots)
+def get_cluster_groups(
+    max_snapshots: int = Query(default=4, ge=1, le=10),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+):
+    # Defaults to today — must match the window the most recent clustering
+    # run used, since cluster_id labels are only meaningful within one run.
+    since, until = _default_today_window(since, until)
+    return _event_store.get_cluster_groups(max_snapshots=max_snapshots, since=since, until=until)
 
 
 @app.get("/cluster/unknowns/status")
@@ -497,14 +693,17 @@ def get_clustering_status():
 def trigger_clustering(
     min_cluster_size: int = Query(default=2, ge=2, le=50),
     distance_threshold: float = Query(default=0.45, ge=0.1, le=1.0),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
 ):
     global _clustering_state
     if not _clustering_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Clustering already in progress")
+    since, until = _default_today_window(since, until)
     _clustering_state = {"status": "running", "result": None, "error": None}
     t = threading.Thread(
         target=_run_clustering_bg,
-        args=(min_cluster_size, distance_threshold),
+        args=(min_cluster_size, distance_threshold, since, until),
         daemon=True,
         name="clustering",
     )
@@ -609,7 +808,19 @@ def create_person(
     # The old re.sub(r"[^a-z0-9_]") stripped Unicode letters, turning Bengali
     # names like "রাহেলা" into "person" and causing silent ID collisions.
     person_id = make_person_id(name)
-    if _person_store.exists(person_id):
+
+    # Claim the DB row first — the UNIQUE constraint is the sole arbiter of a
+    # name collision. Only the winner of a concurrent race proceeds to write
+    # image files, so two requests for the same name can never interleave
+    # uploads into the same directory.
+    try:
+        person_id = _person_store.create(
+            name=name,
+            employee_id=employee_id or None,
+            designation=designation or None,
+            working_area=working_area or None,
+        )
+    except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
 
     # Save uploaded face images to aligned_faces dir
@@ -627,16 +838,8 @@ def create_person(
         if thumbnail_url is None:
             thumbnail_url = f"/faces/{person_id}/{dest.name}"
 
-    try:
-        person_id = _person_store.create(
-            name=name,
-            employee_id=employee_id or None,
-            designation=designation or None,
-            working_area=working_area or None,
-            thumbnail_url=thumbnail_url,
-        )
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=409, detail=f"Person '{name}' already exists")
+    if thumbnail_url:
+        _person_store.set_thumbnail(person_id, thumbnail_url)
 
     p = _person_store.get(person_id)
     return _enrich_persons([p])[0]
@@ -751,11 +954,79 @@ def list_cameras():
         {
             "id": c.get("id"),
             "name": c.get("name"),
-            "active": bool(c.get("url")),
+            # Map YAML `url` → frontend `rtsp_url`; derive active from explicit field or URL presence
+            "rtsp_url": c.get("url") or "",
+            "active": c.get("active", bool(c.get("url"))),
             "roi": c.get("roi"),
         }
         for c in cameras
     ]
+
+
+class ROIUpdate(BaseModel):
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+class CameraPayload(BaseModel):
+    id: str
+    name: str
+    rtsp_url: str = ""
+    active: bool = True
+    roi: Optional[ROIUpdate] = None
+
+
+def _write_cameras_yaml(cameras: List[Dict]) -> None:
+    with open(CAMERAS_CONFIG, "w") as f:
+        yaml.safe_dump({"cameras": cameras}, f, default_flow_style=None, sort_keys=False)
+
+
+def _save_camera_roi(camera_id: str, roi: list) -> bool:
+    with open(CAMERAS_CONFIG) as f:
+        data = yaml.safe_load(f) or {}
+    for cam in data.get("cameras", []):
+        if cam["id"] == camera_id:
+            cam["roi"] = roi
+            break
+    else:
+        return False
+    _write_cameras_yaml(data.get("cameras", []))
+    return True
+
+
+@app.put("/cameras")
+def replace_cameras(cameras: List[CameraPayload]):
+    """Bulk-replace all cameras in cameras.yaml. Maps frontend fields to YAML format."""
+    cam_list: List[Dict] = []
+    for cam in cameras:
+        cam_list.append({
+            "id": cam.id,
+            "name": cam.name,
+            "url": cam.rtsp_url or None,   # frontend rtsp_url → YAML url
+            "active": cam.active,
+            "roi": [cam.roi.x1, cam.roi.y1, cam.roi.x2, cam.roi.y2] if cam.roi else None,
+        })
+    try:
+        _write_cameras_yaml(cam_list)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save cameras.yaml: {e}")
+    log.info("cameras.yaml replaced via API: %d camera(s)", len(cam_list))
+    return {"saved": len(cam_list)}
+
+
+@app.patch("/cameras/{camera_id}/roi")
+def update_camera_roi(camera_id: str, body: ROIUpdate):
+    roi = [body.x1, body.y1, body.x2, body.y2]
+    try:
+        found = _save_camera_roi(camera_id, roi)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save ROI: {e}")
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found")
+    log.info("[%s] ROI updated via API: %s", camera_id, roi)
+    return {"camera_id": camera_id, "roi": roi}
 
 
 @app.post("/cameras/{camera_id}/snapshot")
@@ -782,10 +1053,16 @@ async def capture_snapshot(camera_id: str):
     if not ret or frame is None:
         raise HTTPException(status_code=503, detail="Could not read frame from camera stream")
 
+    h, w = frame.shape[:2]
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     img_b64 = base64.b64encode(buf.tobytes()).decode()
 
-    return {"image_base64": img_b64, "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "image_base64": img_b64,
+        "timestamp": datetime.utcnow().isoformat(),
+        "width": w,
+        "height": h,
+    }
 
 
 @app.get("/cameras/{camera_id}/stream-status")
@@ -804,6 +1081,8 @@ async def stream_camera(camera_id: str):
     cam = next((c for c in cameras if c.get("id") == camera_id), None)
     if cam is None:
         raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found")
+    if not cam.get("url"):
+        raise HTTPException(status_code=503, detail=f"Camera '{camera_id}' has no RTSP URL configured")
 
     async def generate() -> AsyncGenerator[bytes, None]:
         last_jpeg: bytes = b""

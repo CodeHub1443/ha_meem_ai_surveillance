@@ -2,17 +2,17 @@
 // TODO: Replace each with a real backend endpoint when implemented.
 
 import { API_BASE_URL } from "./config";
-import type { Person } from "@/types/surveillance";
+import type { AppSettings } from "@/types/surveillance";
 
 const delay = (ms = 400) => new Promise((r) => setTimeout(r, ms));
 
-export async function requestSnapshot(cameraId: string): Promise<{ image_base64: string; timestamp: string }> {
+export async function requestSnapshot(cameraId: string): Promise<{ image_base64: string; timestamp: string; width: number; height: number }> {
   const res = await fetch(`${API_BASE_URL}/cameras/${cameraId}/snapshot`, { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { detail?: string };
     throw new Error(body.detail ?? `Snapshot failed: ${res.status}`);
   }
-  return res.json() as Promise<{ image_base64: string; timestamp: string }>;
+  return res.json() as Promise<{ image_base64: string; timestamp: string; width: number; height: number }>;
 }
 
 // TODO: Replace with real backend endpoint when implemented.
@@ -22,70 +22,18 @@ export async function testCamera(cameraId: string): Promise<{ success: boolean; 
   return { success: Math.random() > 0.2, latency_ms: Math.floor(50 + Math.random() * 200) };
 }
 
-// TODO: Replace with real backend endpoint when implemented.
-export async function saveSettings(payload: unknown): Promise<{ success: boolean }> {
-  void payload;
-  await delay();
-  return { success: true };
-}
-
-export async function fetchPersons(): Promise<Person[]> {
-  const res = await fetch(`${API_BASE_URL}/persons`);
-  if (!res.ok) throw new Error(`Failed to fetch persons: ${res.status}`);
-  return res.json() as Promise<Person[]>;
-}
-
-// TODO: Replace with real backend endpoint when implemented.
-export async function createPerson(name: string, files: File[]): Promise<{ id: string; name: string }> {
-  void files;
-  await delay(700);
-  return { id: `p${Date.now()}`, name };
-}
-
-// TODO: Replace with real backend endpoint when implemented.
-export async function deletePerson(id: string): Promise<{ success: boolean }> {
-  void id;
-  await delay();
-  return { success: true };
-}
-
-// TODO: Replace with a real backend endpoint that runs extract_faces.py then
-//       build_gallery.py sequentially and returns a job_id for status polling.
-export async function buildGallery(): Promise<{ job_id: string }> {
-  await delay();
-  return { job_id: `job_${Date.now()}` };
-}
-
-let _buildProgress = 0;
-// TODO: Replace with real backend endpoint when implemented.
-// The backend runs two steps: (1) extract_faces.py  0-50%
-//                             (2) build_gallery.py 50-100%
-export async function fetchBuildStatus(): Promise<{
-  status: "idle" | "running" | "done";
-  progress: number;
-  message: string;
-}> {
-  await delay(150);
-  _buildProgress = Math.min(100, _buildProgress + 8);
-  const status = _buildProgress >= 100 ? "done" : "running";
-  let message = "Step 1/2: Extracting faces from raw frames…";
-  if (_buildProgress > 45) message = "Step 2/2: Building gallery embeddings…";
-  if (_buildProgress > 80) message = "Step 2/2: Clustering embedding prototypes…";
-  if (_buildProgress >= 100) {
-    message = "Gallery ready!";
-    setTimeout(() => (_buildProgress = 0), 1500);
+export async function saveSettings(payload: AppSettings): Promise<{ success: boolean }> {
+  // Persist all camera fields (name, id, rtsp_url, active, roi) to cameras.yaml via PUT /cameras
+  const res = await fetch(`${API_BASE_URL}/cameras`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload.cameras),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { detail?: string };
+    throw new Error(body.detail ?? `Camera save failed: ${res.status}`);
   }
-  return { status, progress: _buildProgress, message };
-}
-
-// TODO: Replace with real backend endpoint when implemented.
-// Should return relative paths to aligned face crops stored in
-// data/aligned_faces/{person_id}/ on the server.
-export async function fetchPersonSamples(personId: string): Promise<string[]> {
-  void personId;
-  await delay(400);
-  // Return empty array until backend serves the actual aligned face images
-  return [];
+  return { success: true };
 }
 
 // TODO: Replace with real backend endpoint when implemented.

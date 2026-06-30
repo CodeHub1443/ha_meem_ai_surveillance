@@ -35,10 +35,10 @@ apps/
   dataset_tools/           # Gallery building, face extraction
 
 frontend/src/
-  routes/       # dashboard, live, events, gallery, reports, settings, debug, index (lock)
+  routes/       # dashboard, live, events, gallery, audit, settings, debug, index (lock)
   api/          # Typed API client functions (TanStack Query)
   context/      # SettingsContext, SSEContext (global real-time stream)
-  hooks/        # useSSEStream, useHealthCheck, useMobile
+  hooks/        # useHealthCheck, useMobile
   components/   # Shared UI components
   types/        # TypeScript interfaces
   i18n/         # English + Bengali translations
@@ -148,7 +148,7 @@ An UNKNOWN decision can be **upgraded** to AUTHORIZED if a later frame from the 
 | `/live` | MJPEG stream + real-time event overlay |
 | `/events` | Filterable event table + CSV export |
 | `/gallery` | Enrolled persons + thumbnails |
-| `/reports` | Advanced analytics |
+| `/audit` | Room audit report — entry/exit status per authorized person |
 | `/settings` | Camera config, ROI drawing, thresholds |
 | `/debug` | System diagnostics, log viewer |
 

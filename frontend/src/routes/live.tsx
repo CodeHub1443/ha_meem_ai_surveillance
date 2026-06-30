@@ -29,13 +29,16 @@ function extractIp(url: string): string {
 // ── Slot stream component ─────────────────────────────────────────────────────
 
 function SlotStream({ camera }: { camera: CameraType }) {
-  const [status, setStatus] = useState<"loading" | "ok" | "error">("loading");
+  const [status, setStatus] = useState<"loading" | "ok" | "error" | "no-url">(
+    camera.rtsp_url ? "loading" : "no-url"
+  );
   const imgRef = useRef<HTMLImageElement>(null);
   // srcRef computed once at mount — prevents MJPEG restart on every parent re-render
   const srcRef = useRef(`${API_BASE_URL}/cameras/${camera.id}/stream?t=${Date.now()}`);
 
   // Reset when camera changes (component remounts via key)
   const retry = () => {
+    if (!camera.rtsp_url) { setStatus("no-url"); return; }
     setStatus("loading");
     srcRef.current = `${API_BASE_URL}/cameras/${camera.id}/stream?t=${Date.now()}`;
     if (imgRef.current) imgRef.current.src = srcRef.current;
@@ -43,9 +46,16 @@ function SlotStream({ camera }: { camera: CameraType }) {
 
   return (
     <div className="relative w-full aspect-video bg-black">
+      {/* Camera ID badge — visible during loading/error/no-url; replaced by richer overlay when live */}
+      {status !== "ok" && (
+        <div className="absolute top-2 left-2 z-10 bg-black/50 text-white/60 text-[9px] font-mono px-1 py-0.5 rounded pointer-events-none">
+          {camera.id}
+        </div>
+      )}
       {status === "loading" && (
-        <div className="absolute inset-0 flex items-center justify-center">
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
           <Loader2 className="h-6 w-6 animate-spin text-white/40" />
+          <p className="text-white/25 text-[10px]">Connecting…</p>
         </div>
       )}
       {status === "error" && (
@@ -55,18 +65,29 @@ function SlotStream({ camera }: { camera: CameraType }) {
           <button onClick={retry} className="text-[11px] text-white/40 underline mt-1">Retry</button>
         </div>
       )}
-      <img
-        ref={imgRef}
-        src={srcRef.current}
-        alt={camera.name}
-        className={`w-full h-full object-contain ${status === "error" ? "invisible" : ""}`}
-        onLoad={() => setStatus("ok")}
-        onError={() => setStatus("error")}
-      />
+      {status === "no-url" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-4">
+          <Camera className="h-7 w-7 text-white/20" />
+          <p className="text-white/40 text-xs">No RTSP URL configured</p>
+          <p className="text-white/25 text-[10px]">Set an RTSP URL in Settings to enable this camera</p>
+        </div>
+      )}
+      {(status === "loading" || status === "ok") && (
+        <img
+          ref={imgRef}
+          src={srcRef.current}
+          alt={camera.name}
+          className={`w-full h-full object-contain ${status === "loading" ? "invisible" : ""}`}
+          onLoad={() => setStatus("ok")}
+          onError={() => setStatus("error")}
+        />
+      )}
       {status === "ok" && (
         <>
+          {/* Replace the always-visible id badge with a richer name+id overlay when live */}
           <div className="absolute top-2 left-2 bg-black/60 text-white text-[11px] px-1.5 py-0.5 rounded leading-tight">
-            {camera.name}
+            <div>{camera.name}</div>
+            <div className="text-white/50 text-[9px] font-mono">{camera.id}</div>
           </div>
           <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/60 text-white text-[11px] px-1.5 py-0.5 rounded">
             <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
@@ -103,14 +124,17 @@ function LivePage() {
   const didAssign = useRef(false);
 
   const assignCamera = (cameraId: string) => {
-    if (slots.includes(cameraId)) return;
-    const idx = nextSlotRef.current;
-    nextSlotRef.current = (idx + 1) % 4;
     setSlots((prev) => {
+      if (prev.includes(cameraId)) return prev;
+      // Fill first empty slot — pure updater, no ref mutation (safe under re-invocation)
+      const emptyIdx = prev.indexOf(null);
+      const idx = emptyIdx >= 0 ? emptyIdx : nextSlotRef.current;
       const next = [...prev];
       next[idx] = cameraId;
       return next;
     });
+    // Advance ring outside the updater so it runs exactly once per call
+    nextSlotRef.current = (nextSlotRef.current + 1) % 4;
   };
 
   // Pre-assign camera from URL param — deferred until cameras list loads
@@ -176,7 +200,9 @@ function LivePage() {
                         </span>
                       )}
                     </div>
-                    {ip && <div className="text-[10px] text-white/35 mt-0.5 font-mono">{ip}</div>}
+                    {/* Always show camera_id — critical when two cameras share the same name */}
+                    <div className="text-[10px] text-white/40 mt-0.5 font-mono">{cam.id}</div>
+                    {ip && <div className="text-[10px] text-white/25 font-mono">{ip}</div>}
                   </button>
                 );
               })}

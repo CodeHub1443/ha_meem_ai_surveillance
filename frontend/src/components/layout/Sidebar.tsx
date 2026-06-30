@@ -1,11 +1,12 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Bell, Camera, Users, Settings, Terminal, Shield } from "lucide-react";
+import { LayoutDashboard, Bell, Camera, Users, Settings, Terminal, Shield, ClipboardCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 const items = [
   { to: "/dashboard", key: "nav.dashboard", icon: LayoutDashboard },
   { to: "/live",      key: "nav.live",      icon: Camera },
   { to: "/gallery",   key: "nav.gallery",   icon: Users },
+  { to: "/audit",     key: "nav.audit",     icon: ClipboardCheck },
   { to: "/events",    key: "nav.events",    icon: Bell },
   { to: "/settings",  key: "nav.settings",  icon: Settings },
   { to: "/debug",     key: "nav.debug",     icon: Terminal },

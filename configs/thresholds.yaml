@@ -1,26 +1,27 @@
 # Detection and recognition thresholds
 detection:
-  confidence: 0.5
+  confidence: 0.4
 
 recognition:
-  similarity_threshold: 0.60
-  min_face_size: 80           # Minimum face width in pixels (original value)
-  blur_threshold: 30           # Upper cap for adaptive threshold (original was 100; 80 gives leeway for smaller faces)
-  upgrade_margin: 0.05         # Extra score above threshold required to upgrade UNKNOWN → AUTHORIZED
+  similarity_threshold: 0.52
+  min_face_size: 80            # Minimum face width in pixels
+  blur_threshold: 30           # Fallback for adaptive blur threshold
+  upgrade_margin: 0.02         # Extra score above threshold to upgrade UNKNOWN → AUTHORIZED (lowered from 0.05)
   match_margin: 0.05           # Min gap between top-1 and top-2 identity scores; rejects near-ties
   match_top_k: 10              # Embedding candidates retrieved before identity-level aggregation
 
 # Temporal fusion / aggregation
 fusion:
   buffer_size: 10              # Sliding window of frames per track
-  min_decision_seconds: 0.50   # Collect ~18 frames before first decision to reduce bad-angle false unknowns
+  min_frames: 5                # Min successfully-aligned frames before first decision
+  min_decision_seconds: 0.8    # Camera delivers ~13fps; workers visible ~1-1.2s; need margin below that
   recency_decay: 0.95          # Exponential weight decay (1.0 = no decay)
-  expire_after_seconds: 5.0    # Raised: more time to accumulate frames per track
+  expire_after_seconds: 5.0    # Aggregator buffer expiry (identity state protected by Phase 1 guard)
 
 # Multi-object tracking
 tracking:
-  iou_threshold: 0.3
-  max_age: 15                  # Frames a track can coast without a detection (~1s at 15fps)
+  iou_threshold: 0.2
+  max_age: 30                  # Frames a track coasts without detection (~2s at 15fps)
 
 # Per-identity re-alert cooldown
 identity_cooldown_seconds: 6.0
@@ -30,3 +31,11 @@ quality:
   adaptive_blur: true
   adaptive_percentile: 20.0   # Set threshold at 20th percentile of observed scores
   adaptive_window: 500         # Number of recent scores to consider
+  min_pose_weight: 0.20        # Skip profile frames (pose_w floor = 0.10 = extreme profile)
+  min_stab: 0.15               # Skip tracking-contamination frames (stab < 0.15 = different person)
+
+# Diagnostic logging — per-frame scores for accuracy root-cause analysis
+# Produces [DIAG] and [DIAG DECISION] log lines at INFO level.
+# Disable in production once root cause is identified.
+diagnostic:
+  per_frame_logging: true
